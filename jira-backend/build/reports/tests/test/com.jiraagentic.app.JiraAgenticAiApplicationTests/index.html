@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+<meta http-equiv="x-ua-compatible" content="IE=edge"/>
+<title>Test results - com.jiraagentic.app.JiraAgenticAiApplicationTests</title>
+<link href="../css/base-style.css" rel="stylesheet" type="text/css"/>
+<link href="../css/style.css" rel="stylesheet" type="text/css"/>
+<script src="../js/report.js" type="text/javascript"></script>
+</head>
+<body>
+<div id="content">
+<div class="breadcrumbs">
+<a class="breadcrumb" href="../index.html">all</a> &gt; 
+<span class="breadcrumb">com.jiraagentic.app.JiraAgenticAiApplicationTests</span>
+</div>
+<div class="tab-container">
+<ul class="tabLinks">
+<li>
+<a class="successGroup" href="#">Gradle Test Run :jira-backend:test</a>
+</li>
+</ul>
+<div class="tab">
+<h2>Gradle Test Run :jira-backend:test</h2>
+<h1>JiraAgenticAiApplicationTests</h1>
+<div class="tab-container">
+<ul class="tabLinks">
+<li>
+<a class="" href="#">summary</a>
+</li>
+<li>
+<a class="" href="#">standard output</a>
+</li>
+</ul>
+<div class="tab">
+<h2>summary</h2>
+<div>
+<div class="summary">
+<table>
+<tr>
+<td>
+<div class="summaryGroup">
+<table>
+<tr>
+<td>
+<div class="infoBox">
+<div class="counter">1</div>
+<p>tests</p>
+</div>
+</td>
+<td>
+<div class="infoBox">
+<div class="counter">0</div>
+<p>failures</p>
+</div>
+</td>
+<td>
+<div class="infoBox">
+<div class="counter">0</div>
+<p>skipped</p>
+</div>
+</td>
+<td>
+<div class="infoBox duration">
+<div class="counter">9.987s</div>
+<p>duration</p>
+</div>
+</td>
+</tr>
+</table>
+</div>
+</td>
+<td>
+<div class="infoBox success successRate">
+<div class="percent">100%</div>
+<p>successful</p>
+</div>
+</td>
+</tr>
+</table>
+</div>
+<table class="test-results">
+<thead>
+<tr>
+<th>Child</th>
+<th hidden="">Name</th>
+<th>Tests</th>
+<th>Failures</th>
+<th>Skipped</th>
+<th>Duration</th>
+<th>Success rate</th>
+</tr>
+</thead>
+<tr>
+<td class="success">contextLoads()</td>
+<td class="path" hidden="">contextLoads()</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+<td>0.581s</td>
+<td class="success">100%</td>
+</tr>
+</table>
+</div>
+</div>
+<div class="tab">
+<h2>standard output</h2>
+<span class="code">
+<pre id="root-0-test-stdout-com.jiraagentic.app.JiraAgenticAiApplicationTests">16:56:14.649 [Test worker] INFO org.springframework.test.context.support.AnnotationConfigContextLoaderUtils -- Could not detect default configuration classes for test class [com.jiraagentic.app.JiraAgenticAiApplicationTests]: JiraAgenticAiApplicationTests does not declare any static, non-private, non-final, nested classes annotated with @Configuration.
+16:56:14.793 [Test worker] INFO org.springframework.boot.test.context.SpringBootTestContextBootstrapper -- Found @SpringBootConfiguration com.jiraagentic.app.JiraAgenticAiApplication for test class com.jiraagentic.app.JiraAgenticAiApplicationTests
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+ :: Spring Boot ::                (v3.2.0)
+
+2026-05-09T16:56:15.294-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] c.j.app.JiraAgenticAiApplicationTests    : Starting JiraAgenticAiApplicationTests using Java 17.0.18 with PID 9406 (started by michael in /Users/michael/zhitongguigu/rag-service/jira-agentic-ai/jira-backend)
+2026-05-09T16:56:15.296-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] c.j.app.JiraAgenticAiApplicationTests    : No active profile set, falling back to 1 default profile: &quot;default&quot;
+2026-05-09T16:56:16.541-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .s.d.r.c.RepositoryConfigurationDelegate : Multiple Spring Data modules found, entering strict repository configuration mode
+2026-05-09T16:56:16.543-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data JPA repositories in DEFAULT mode.
+2026-05-09T16:56:16.692-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 145 ms. Found 15 JPA repository interfaces.
+2026-05-09T16:56:16.738-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .s.d.r.c.RepositoryConfigurationDelegate : Multiple Spring Data modules found, entering strict repository configuration mode
+2026-05-09T16:56:16.739-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data Redis repositories in DEFAULT mode.
+2026-05-09T16:56:16.765-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.jiraagentic.app.repository.CommentRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-05-09T16:56:16.766-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.jiraagentic.app.repository.GroupMemberRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-05-09T16:56:16.766-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.jiraagentic.app.repository.IssueAttachmentRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-05-09T16:56:16.766-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.jiraagentic.app.repository.IssueCodeLinkRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-05-09T16:56:16.766-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.jiraagentic.app.repository.IssueHistoryRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-05-09T16:56:16.766-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.jiraagentic.app.repository.IssueLinkRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-05-09T16:56:16.766-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.jiraagentic.app.repository.IssueRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-05-09T16:56:16.767-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.jiraagentic.app.repository.SpaceGithubRepoRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-05-09T16:56:16.767-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.jiraagentic.app.repository.SpaceGroupRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-05-09T16:56:16.767-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.jiraagentic.app.repository.SpaceMemberRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-05-09T16:56:16.767-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.jiraagentic.app.repository.SpaceRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-05-09T16:56:16.767-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.jiraagentic.app.repository.SprintRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-05-09T16:56:16.767-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.jiraagentic.app.repository.UserGroupRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-05-09T16:56:16.767-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.jiraagentic.app.repository.UserRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-05-09T16:56:16.767-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .RepositoryConfigurationExtensionSupport : Spring Data Redis - Could not safely identify store assignment for repository candidate interface com.jiraagentic.app.repository.WorkLogRepository; If you want this repository to be a Redis repository, consider annotating your entities with one of these annotations: org.springframework.data.redis.core.RedisHash (preferred), or consider extending one of the following types with your repository: org.springframework.data.keyvalue.repository.KeyValueRepository
+2026-05-09T16:56:16.769-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 25 ms. Found 0 Redis repository interfaces.
+2026-05-09T16:56:17.701-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Starting...
+2026-05-09T16:56:17.865-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] com.zaxxer.hikari.pool.HikariPool        : HikariPool-1 - Added connection org.postgresql.jdbc.PgConnection@713e7d9a
+2026-05-09T16:56:17.868-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Start completed.
+2026-05-09T16:56:18.012-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] o.f.c.internal.license.VersionPrinter    : Flyway Community Edition 9.22.3 by Redgate
+2026-05-09T16:56:18.012-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] o.f.c.internal.license.VersionPrinter    : See release notes here: https://rd.gt/416ObMi
+2026-05-09T16:56:18.012-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] o.f.c.internal.license.VersionPrinter    : 
+2026-05-09T16:56:18.028-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] org.flywaydb.core.FlywayExecutor         : Database: jdbc:postgresql://localhost:5432/pocdb (PostgreSQL 15.17)
+2026-05-09T16:56:18.083-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] o.f.core.internal.command.DbValidate     : Successfully validated 15 migrations (execution time 00:00.033s)
+2026-05-09T16:56:18.094-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] o.f.core.internal.command.DbMigrate      : Current version of schema &quot;public&quot;: 14
+2026-05-09T16:56:18.096-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] o.f.core.internal.command.DbMigrate      : Schema &quot;public&quot; is up to date. No migration necessary.
+2026-05-09T16:56:18.281-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] o.hibernate.jpa.internal.util.LogHelper  : HHH000204: Processing PersistenceUnitInfo [name: default]
+2026-05-09T16:56:18.321-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] org.hibernate.Version                    : HHH000412: Hibernate ORM core version 6.3.1.Final
+2026-05-09T16:56:18.352-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] o.h.c.internal.RegionFactoryInitiator    : HHH000026: Second-level cache disabled
+2026-05-09T16:56:18.537-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] o.s.o.j.p.SpringPersistenceUnitInfo      : No LoadTimeWeaver setup: ignoring JPA class transformer
+2026-05-09T16:56:19.768-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] o.h.e.t.j.p.i.JtaPlatformInitiator       : HHH000489: No JTA platform available (set 'hibernate.transaction.jta.platform' to enable JTA platform integration)
+2026-05-09T16:56:19.806-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] j.LocalContainerEntityManagerFactoryBean : Initialized JPA EntityManagerFactory for persistence unit 'default'
+2026-05-09T16:56:20.668-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] o.s.d.j.r.query.QueryEnhancerFactory     : Hibernate is in classpath; If applicable, HQL parser will be used.
+2026-05-09T16:56:22.718-07:00  WARN 9406 --- [jira-agentic-ai] [    Test worker] JpaBaseConfiguration$JpaWebConfiguration : spring.jpa.open-in-view is enabled by default. Therefore, database queries may be performed during view rendering. Explicitly configure spring.jpa.open-in-view to disable this warning
+2026-05-09T16:56:23.244-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] o.s.s.web.DefaultSecurityFilterChain     : Will secure any request with [org.springframework.security.web.session.DisableEncodeUrlFilter@67367175, org.springframework.security.web.context.request.async.WebAsyncManagerIntegrationFilter@2f975804, org.springframework.security.web.context.SecurityContextHolderFilter@21e860cd, org.springframework.security.web.header.HeaderWriterFilter@25ef4ad5, org.springframework.web.filter.CorsFilter@3b00a7b9, org.springframework.security.web.authentication.logout.LogoutFilter@3763c93b, org.springframework.security.web.savedrequest.RequestCacheAwareFilter@3dbdc020, org.springframework.security.web.servletapi.SecurityContextHolderAwareRequestFilter@5af69032, com.jiraagentic.app.security.GatewayInternalAuthFilter@a2cf1b6, org.springframework.security.web.authentication.AnonymousAuthenticationFilter@63cdae1d, org.springframework.security.web.access.ExceptionTranslationFilter@43df5cba, org.springframework.security.web.access.intercept.AuthorizationFilter@38be950e]
+2026-05-09T16:56:23.845-07:00  INFO 9406 --- [jira-agentic-ai] [    Test worker] c.j.app.JiraAgenticAiApplicationTests    : Started JiraAgenticAiApplicationTests in 8.897 seconds (process running for 10.249)
+</pre>
+<button class="clipboard-copy-btn" aria-label="Copy to clipboard" data-copy-element-id="root-0-test-stdout-com.jiraagentic.app.JiraAgenticAiApplicationTests">Copy</button>
+</span>
+</div>
+</div>
+</div>
+</div>
+<div id="footer">
+<p>
+<div>
+<label class="hidden" id="label-for-line-wrapping-toggle" for="line-wrapping-toggle">Wrap lines
+<input id="line-wrapping-toggle" type="checkbox" autocomplete="off"/>
+</label>
+</div>Generated by 
+<a href="https://www.gradle.org">Gradle 9.3.1</a> at May 9, 2026, 4:56:24 PM</p>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Visual ER diagram — Jira Agentic AI (core schema)</title>
+  <style>
+    :root {
+      color-scheme: dark light;
+      --bg: #0f1419;
+      --fg: #e6edf3;
+      --muted: #8b949e;
+      --border: #30363d;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f6f8fa;
+        --fg: #1f2328;
+        --muted: #59636e;
+        --border: #d1d9e0;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.5;
+    }
+    header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      max-width: 120rem;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 1.125rem;
+      font-weight: 600;
+      margin: 0 0 0.35rem;
+    }
+    p {
+      margin: 0;
+      font-size: 0.8125rem;
+      color: var(--muted);
+      max-width: 72ch;
+    }
+    .wrap {
+      padding: 1rem;
+      overflow: auto;
+      min-height: calc(100vh - 5rem);
+    }
+    .mermaid {
+      display: flex;
+      justify-content: flex-start;
+      min-width: min(100%, 1400px);
+    }
+    .err {
+      color: #f85149;
+      padding: 1rem;
+      font-size: 0.875rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Entity–relationship diagram (visual)</h1>
+    <p>
+      Generated from Flyway <code>V1</code>–<code>V10</code> core tables. FK columns are listed on each entity; see
+      <code>API_DESIGN_CORE_FINAL_v1.md</code> (Cardinality baseline table) for which FKs are nullable — notably
+      <code>spaces.owner_id</code>, <code>issues.sprint_id</code> / <code>parent_id</code> / <code>assignee_id</code> /
+      <code>reporter_id</code>, <code>issue_history.actor_id</code>, <code>issue_attachments.uploader_id</code>,
+      <code>issue_code_links.creator_id</code>. Junction tables implement logical many-to-many between users, spaces,
+      and groups. Mermaid loads from jsDelivr (network once unless cached).
+    </p>
+  </header>
+  <div class="wrap">
+    <div class="mermaid">
+erDiagram
+  users {
+    bigint id PK
+    string username
+    string email
+    string name
+  }
+  spaces {
+    bigint id PK
+    string space_key
+    string name
+    bigint owner_id FK
+    timestamptz deleted_at
+    text github_pat
+  }
+  user_groups {
+    bigint id PK
+    string name
+    bigint owner_id FK
+  }
+  space_members {
+    bigint id PK
+    bigint space_id FK
+    bigint user_id FK
+    string role
+  }
+  group_members {
+    bigint id PK
+    bigint group_id FK
+    bigint user_id FK
+    string role
+  }
+  space_groups {
+    bigint id PK
+    bigint space_id FK
+    bigint group_id FK
+  }
+  space_github_repos {
+    bigint id PK
+    bigint space_id FK
+    string owner
+    string repo
+  }
+  sprints {
+    bigint id PK
+    bigint space_id FK
+    string name
+    string status
+  }
+  issues {
+    bigint id PK
+    string issue_key
+    bigint space_id FK
+    bigint sprint_id FK
+    bigint parent_id FK
+    bigint assignee_id FK
+    bigint reporter_id FK
+    string issue_type
+    string status
+  }
+  issue_labels {
+    bigint issue_id FK
+    string label
+  }
+  comments {
+    bigint id PK
+    bigint issue_id FK
+    bigint author_id FK
+    text content
+  }
+  issue_history {
+    bigint id PK
+    bigint issue_id FK
+    bigint actor_id FK
+    string event_type
+  }
+  work_logs {
+    bigint id PK
+    bigint issue_id FK
+    bigint author_id FK
+    int spent_minutes
+  }
+  issue_links {
+    bigint id PK
+    bigint source_issue_id FK
+    bigint target_issue_id FK
+    string link_type
+  }
+  issue_attachments {
+    bigint id PK
+    bigint issue_id FK
+    bigint uploader_id FK
+    string storage_filename
+  }
+  issue_code_links {
+    bigint id PK
+    bigint issue_id FK
+    bigint creator_id FK
+    string url
+    string kind
+  }
+
+  users ||--o{ spaces : "owner"
+  users ||--o{ user_groups : "group_owner"
+  users ||--o{ space_members : "member"
+  spaces ||--o{ space_members : "member"
+  users ||--o{ group_members : "member"
+  user_groups ||--o{ group_members : "member"
+  spaces ||--o{ space_groups : "link"
+  user_groups ||--o{ space_groups : "link"
+  spaces ||--o{ space_github_repos : "repo"
+  spaces ||--o{ sprints : "sprints"
+  spaces ||--o{ issues : "issues"
+  sprints ||--o{ issues : "in_sprint"
+  issues ||--o{ issues : "parent_child"
+  users ||--o{ issues : "assignee_or_reporter"
+  issues ||--o{ issue_labels : "labels"
+  issues ||--o{ comments : "comments"
+  users ||--o{ comments : "author"
+  issues ||--o{ issue_history : "history"
+  users ||--o{ issue_history : "actor"
+  issues ||--o{ work_logs : "logs"
+  users ||--o{ work_logs : "author"
+  issues ||--o{ issue_links : "source"
+  issues ||--o{ issue_links : "target"
+  issues ||--o{ issue_attachments : "files"
+  users ||--o{ issue_attachments : "uploader"
+  issues ||--o{ issue_code_links : "dev"
+  users ||--o{ issue_code_links : "creator"
+    </div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    (function () {
+      var dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+      mermaid.initialize({
+        startOnLoad: true,
+        theme: dark ? "dark" : "neutral",
+        er: { useMaxWidth: false },
+      });
+    })();
+  </script>
+</body>
+</html>

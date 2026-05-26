@@ -1,0 +1,110 @@
+server:
+  port: 8080
+
+# Must match backend `app.security.jwt` so tokens issued by the API validate here.
+app:
+  security:
+    jwt:
+      secret: ${APP_JWT_SECRET:change-this-dev-secret-key-change-this}
+      issuer: ${APP_JWT_ISSUER:jira-agentic-ai}
+
+spring:
+  application:
+    name: jira-agentic-gateway
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+
+  cloud:
+    gateway:
+      httpclient:
+        connect-timeout: ${GATEWAY_HTTP_CONNECT_TIMEOUT_MS:5000}
+        response-timeout: ${GATEWAY_HTTP_RESPONSE_TIMEOUT:10s}
+
+      # Avoid duplicate Access-Control-* when the backend also adds CORS (e.g. CorsFilter on 8081).
+      default-filters:
+        - DedupeResponseHeader=Access-Control-Allow-Credentials Access-Control-Allow-Origin Vary
+        - AddRequestHeader=X-Gateway-Internal, ${INTERNAL_GATEWAY_TOKEN:dev-internal-gateway-token-min-32-chars-long!!}
+
+      # Browser (Vite on another port) calls http://localhost:8080 → cross-origin.
+      # Without this, OPTIONS preflight can fail and the real POST never reaches the backend (no logs there).
+      globalcors:
+        add-to-simple-url-handler-mapping: true
+        cors-configurations:
+          '[/**]':
+            allowed-origin-patterns:
+              - 'http://localhost:*'
+              - 'http://127.0.0.1:*'
+            allowed-methods:
+              - GET
+              - POST
+              - PUT
+              - DELETE
+              - PATCH
+              - OPTIONS
+            allowed-headers: '*'
+            allow-credentials: true
+
+      routes:
+        - id: backend-api
+          uri: http://127.0.0.1:8081
+          predicates:
+            - Path=/api/**
+          filters:
+            - name: RequestRateLimiter
+              args:
+                # For burst + sustain limits per user/IP.
+                redis-rate-limiter.replenishRate: ${GATEWAY_RATE_LIMIT_REPLENISH_RATE:20}
+                redis-rate-limiter.burstCapacity: ${GATEWAY_RATE_LIMIT_BURST_CAPACITY:40}
+                redis-rate-limiter.requestedTokens: ${GATEWAY_RATE_LIMIT_REQUESTED_TOKENS:1}
+                key-resolver: "#{@userOrIpKeyResolver}"
+            # Retry must be configured after CircuitBreaker (Spring Cloud Gateway recommendation).
+            - name: CircuitBreaker
+              args:
+                name: backendApi
+                fallbackUri: forward:/fallback
+            - name: Retry
+              args:
+                retries: ${GATEWAY_RETRY_MAX_ATTEMPTS:2}
+                methods: GET,HEAD
+                statuses: BAD_GATEWAY,GATEWAY_TIMEOUT,INTERNAL_SERVER_ERROR,SERVICE_UNAVAILABLE
+                backoff:
+                  firstBackoff: ${GATEWAY_RETRY_FIRST_BACKOFF:50ms}
+                  maxBackoff: ${GATEWAY_RETRY_MAX_BACKOFF:500ms}
+                  factor: ${GATEWAY_RETRY_BACKOFF_FACTOR:2}
+                  basedOnPreviousValue: false
+        - id: backend-swagger-ui
+          uri: http://127.0.0.1:8081
+          predicates:
+            - Path=/swagger-ui/**
+        - id: backend-swagger-index
+          uri: http://127.0.0.1:8081
+          predicates:
+            - Path=/swagger-ui.html
+        - id: backend-openapi
+          uri: http://127.0.0.1:8081
+          predicates:
+            - Path=/v3/api-docs/**
+        - id: backend-oauth2
+          uri: http://127.0.0.1:8081
+          predicates:
+            - Path=/oauth2/**
+        - id: backend-login
+          uri: http://127.0.0.1:8081
+          predicates:
+            - Path=/login/**
+        - id: backend-logout
+          uri: http://127.0.0.1:8081
+          predicates:
+            - Path=/logout
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      backendApi:
+        slidingWindowSize: ${GATEWAY_CB_SLIDING_WINDOW:100}
+        minimumNumberOfCalls: ${GATEWAY_CB_MIN_CALLS:20}
+        failureRateThreshold: ${GATEWAY_CB_FAILURE_RATE:50}
+        waitDurationInOpenState: ${GATEWAY_CB_OPEN_WAIT:30s}
+        permittedNumberOfCallsInHalfOpenState: ${GATEWAY_CB_HALF_OPEN_CALLS:5}
