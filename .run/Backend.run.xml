@@ -1,0 +1,14 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Backend" type="SpringBootApplicationConfigurationType" factoryName="Spring Boot">
+    <envs>
+      <env name="GITHUB_CLIENT_ID" value="Ov23lioIfuuFr0cj3fGM" />
+      <env name="GITHUB_CLIENT_SECRET" value="73ace3f07b4898f96b5e45e63b3a927c5e5151eb" />
+      <env name="GITHUB_OAUTH_ENABLED" value="true" />
+    </envs>
+    <module name="jira-agentic-ai.jira-backend.main" />
+    <option name="SPRING_BOOT_MAIN_CLASS" value="com.jiraagentic.app.JiraAgenticAiApplication" />
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>
