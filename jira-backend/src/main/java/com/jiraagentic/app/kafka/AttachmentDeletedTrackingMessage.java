@@ -18,7 +18,9 @@ public record AttachmentDeletedTrackingMessage(
         String mimeType,
         long byteSize,
         String storageBackend,
-        String storageKey
+        String bucket,
+        String storageKey,
+        String storageUri
 ) {
     public static AttachmentDeletedTrackingMessage from(AttachmentDeletedEvent e, UUID eventId) {
         return new AttachmentDeletedTrackingMessage(
@@ -33,7 +35,9 @@ public record AttachmentDeletedTrackingMessage(
                 e.contentType(),
                 e.sizeBytes(),
                 e.storageBackend(),
-                e.storageKey()
+                e.storageBucket(),
+                e.storageKey(),
+                AttachmentStorageUris.s3Uri(e.storageBackend(), e.storageBucket(), e.storageKey())
         );
     }
 }

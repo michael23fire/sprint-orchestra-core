@@ -6,7 +6,9 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * Kafka payload when an attachment is uploaded — tracking / correlation only (POC-friendly).
+ * Kafka payload when an attachment is uploaded — tracking / correlation for downstream ingestion.
+ * {@code storageUri} is a stable object locator ({@code s3://bucket/key}) for vector / RAG workers
+ * that fetch the binary with their own S3 credentials.
  */
 public record AttachmentUploadedTrackingMessage(
         String eventId,
@@ -20,7 +22,9 @@ public record AttachmentUploadedTrackingMessage(
         String mimeType,
         long byteSize,
         String storageBackend,
-        String storageKey
+        String bucket,
+        String storageKey,
+        String storageUri
 ) {
     public static AttachmentUploadedTrackingMessage from(AttachmentUploadedEvent e, UUID eventId) {
         return new AttachmentUploadedTrackingMessage(
@@ -35,7 +39,9 @@ public record AttachmentUploadedTrackingMessage(
                 e.contentType(),
                 e.sizeBytes(),
                 e.storageBackend(),
-                e.storageKey()
+                e.storageBucket(),
+                e.storageKey(),
+                AttachmentStorageUris.s3Uri(e.storageBackend(), e.storageBucket(), e.storageKey())
         );
     }
 }
