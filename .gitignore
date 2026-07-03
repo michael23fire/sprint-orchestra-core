@@ -12,6 +12,7 @@
 
 # Package Files #
 *.jar
+!gradle/wrapper/gradle-wrapper.jar
 *.war
 *.nar
 *.ear
@@ -23,21 +24,46 @@
 hs_err_pid*
 replay_pid*
 
-# Gradle
+# ========== Gradle / Java build ==========
 .gradle/
 **/build/
 
-# IntelliJ IDEA (local IDE settings)
+# ========== IntelliJ IDEA ==========
 .idea/
 *.iml
 *.ipr
 *.iws
 out/
 
-# JetBrains run configurations (optional: remove this line to share .run/*.xml with the team)
+# Shared run configs: keep .run/ tracked (comment line below to ignore personal configs)
 #.run/
 
-# OS / editor
+# ========== Secrets & local config ==========
+.env
+.env.*
+!.env.example
+**/application-local.yml
+**/application-local.properties
+docker-compose.override.yml
+
+# ========== Python (scripts/) ==========
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# ========== App local data ==========
+storage/
+
+# ========== Editors ==========
+.vscode/
+
+# ========== Java tooling ==========
+*.hprof
+*.orig
+
+# ========== OS ==========
 .DS_Store
 Thumbs.db
 *.swp
