@@ -1,4 +1,4 @@
-package com.jiraagentic.app;
+package com.jiraagentic.app.config;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;

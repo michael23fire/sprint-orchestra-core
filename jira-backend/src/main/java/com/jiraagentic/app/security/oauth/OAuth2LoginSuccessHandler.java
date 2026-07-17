@@ -1,4 +1,4 @@
-package com.jiraagentic.app.config;
+package com.jiraagentic.app.security.oauth;
 
 import com.jiraagentic.app.entity.User;
 import com.jiraagentic.app.service.JwtTokenService;
@@ -30,7 +30,11 @@ public class OAuth2LoginSuccessHandler implements AuthenticationSuccessHandler {
     private String frontendBaseUrl;
 
     @Override
-    public void onAuthenticationSuccess(HttpServletRequest request, HttpServletResponse response, Authentication authentication) throws IOException {
+    public void onAuthenticationSuccess(
+            HttpServletRequest request,
+            HttpServletResponse response,
+            Authentication authentication
+    ) throws IOException {
         if (!(authentication instanceof OAuth2AuthenticationToken oauth2Token)) {
             response.sendRedirect(frontendBaseUrl + "/login?error=oauth");
             return;
@@ -63,7 +67,8 @@ public class OAuth2LoginSuccessHandler implements AuthenticationSuccessHandler {
         }
 
         String tokenEnc = URLEncoder.encode(jwt, StandardCharsets.UTF_8);
-        String target = frontendBaseUrl.replaceAll("/$", "") + "/oauth-callback?access_token=" + tokenEnc + "&token_type=Bearer";
+        String target = frontendBaseUrl.replaceAll("/$", "")
+                + "/oauth-callback?access_token=" + tokenEnc + "&token_type=Bearer";
         response.sendRedirect(target);
     }
 }

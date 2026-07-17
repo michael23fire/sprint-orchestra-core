@@ -8,8 +8,10 @@ import com.jiraagentic.app.repository.GroupMemberRepository;
 import com.jiraagentic.app.repository.UserGroupRepository;
 import com.jiraagentic.app.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -71,7 +73,8 @@ public class GroupService {
     }
 
     @Transactional
-    public GroupDto update(Long id, CreateGroupRequest req) {
+    public GroupDto update(Long id, CreateGroupRequest req, Long actorUserId) {
+        requireGroupAdmin(id, actorUserId);
         UserGroup group = groupRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Group not found: " + id));
         if (req.getName() != null) group.setName(req.getName());
@@ -80,7 +83,8 @@ public class GroupService {
     }
 
     @Transactional
-    public void delete(Long id) {
+    public void delete(Long id, Long actorUserId) {
+        requireGroupAdmin(id, actorUserId);
         if (!groupRepository.existsById(id)) {
             throw new RuntimeException("Group not found: " + id);
         }
@@ -94,7 +98,8 @@ public class GroupService {
     }
 
     @Transactional
-    public void addMember(Long groupId, Long userId) {
+    public void addMember(Long groupId, Long userId, Long actorUserId) {
+        requireGroupAdmin(groupId, actorUserId);
         if (groupMemberRepository.existsByGroupIdAndUserId(groupId, userId)) {
             return;
         }
@@ -111,8 +116,34 @@ public class GroupService {
     }
 
     @Transactional
-    public void removeMember(Long groupId, Long userId) {
+    public void removeMember(Long groupId, Long userId, Long actorUserId) {
+        requireGroupAdmin(groupId, actorUserId);
+        UserGroup group = groupRepository.findById(groupId)
+                .orElseThrow(() -> new RuntimeException("Group not found: " + groupId));
+        if (group.getOwner() != null && group.getOwner().getId().equals(userId)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Cannot remove the group owner");
+        }
         groupMemberRepository.deleteByGroupIdAndUserId(groupId, userId);
+    }
+
+    /**
+     * Creator/owner or an ADMIN group member may manage membership and delete the group.
+     */
+    private void requireGroupAdmin(Long groupId, Long actorUserId) {
+        if (actorUserId == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Authentication required");
+        }
+        UserGroup group = groupRepository.findById(groupId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Group not found: " + groupId));
+        if (group.getOwner() != null && group.getOwner().getId().equals(actorUserId)) {
+            return;
+        }
+        boolean isAdmin = groupMemberRepository.findByGroupIdAndUserId(groupId, actorUserId)
+                .map(gm -> "ADMIN".equalsIgnoreCase(gm.getRole()))
+                .orElse(false);
+        if (!isAdmin) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Only group admins can manage this group");
+        }
     }
 
     private GroupDto toDto(UserGroup group) {

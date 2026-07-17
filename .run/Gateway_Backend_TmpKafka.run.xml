@@ -1,8 +1,0 @@
-<component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="Gateway + Backend + Tmp Kafka POC" type="CompoundRunConfigurationType" factoryName="Compound Run Configuration">
-    <toRun name="Backend (Kafka ingestion)" type="SpringBootApplicationConfigurationType" />
-    <toRun name="Gateway" type="SpringBootApplicationConfigurationType" />
-    <toRun name="Tmp Kafka POC" type="SpringBootApplicationConfigurationType" />
-    <method v="2" />
-  </configuration>
-</component>

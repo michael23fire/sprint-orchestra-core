@@ -6,8 +6,8 @@ import org.springframework.cache.annotation.EnableCaching;
 
 @SpringBootApplication
 @EnableCaching  // 開啟 Cache 功能
-public class JiraAgenticAiApplication {  // 改這裡
+public class JiraAgenticAiApplication {
 	public static void main(String[] args) {
-		SpringApplication.run(JiraAgenticAiApplication.class, args);  // 改這裡
+		SpringApplication.run(JiraAgenticAiApplication.class, args);
 	}
 }

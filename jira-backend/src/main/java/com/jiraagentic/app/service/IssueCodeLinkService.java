@@ -102,11 +102,6 @@ public class IssueCodeLinkService {
     }
 
     /**
-     * Re-fetches metadata from GitHub for every code link in the space that
-     * has a recognised provider/kind and updates title/state/author.
-     * Returns the number of links that had at least one field changed.
-     */
-    /**
      * Used by the repo scanner. If a link with this exact URL already exists
      * on the issue, returns it untouched; otherwise creates a fresh one. This
      * is idempotent so the scan can safely be re-run.
@@ -175,6 +170,10 @@ public class IssueCodeLinkService {
         int checked = 0;
         int updated = 0;
         for (IssueCodeLink link : links) {
+            // Commits are no longer surfaced in the product UI; skip refreshing them.
+            if ("commit".equals(link.getKind())) {
+                continue;
+            }
             checked++;
             if (applyRefresh(link, actorUserId, githubToken)) updated++;
         }

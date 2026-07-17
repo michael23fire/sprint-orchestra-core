@@ -121,7 +121,7 @@ sequenceDiagram
 
   U->>FE: Upload + Save 描述／附件
   FE->>GW: REST multipart / PATCH
-  GW->>CP: Forward + JWT
+  GW->>CP: Forward + internal trust and user headers
   CP->>OBJ: Put attachment bytes
   CP->>PG: Insert attachment row + issue 更新
   Note over CP: Transaction commit

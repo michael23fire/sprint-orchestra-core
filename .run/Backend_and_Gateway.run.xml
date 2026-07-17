@@ -1,7 +1,0 @@
-<component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="Backend + Gateway" type="CompoundRunConfigurationType" factoryName="Compound Run Configuration">
-    <toRun name="Backend" type="SpringBootApplicationConfigurationType" />
-    <toRun name="Gateway" type="SpringBootApplicationConfigurationType" />
-    <method v="2" />
-  </configuration>
-</component>

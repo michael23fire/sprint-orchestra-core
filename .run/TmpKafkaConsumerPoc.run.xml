@@ -1,9 +1,0 @@
-<component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="Tmp Kafka POC" type="SpringBootApplicationConfigurationType" factoryName="Spring Boot">
-    <module name="jira-agentic-ai.tmp-kafka-consumer-poc.main" />
-    <option name="SPRING_BOOT_MAIN_CLASS" value="com.jiraagentic.poc.kafka.TmpKafkaConsumerPocApplication" />
-    <method v="2">
-      <option name="Make" enabled="true" />
-    </method>
-  </configuration>
-</component>

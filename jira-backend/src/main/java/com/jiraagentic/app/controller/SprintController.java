@@ -1,6 +1,8 @@
 package com.jiraagentic.app.controller;
 
+import com.jiraagentic.app.dto.CompleteSprintRequest;
 import com.jiraagentic.app.dto.CreateSprintRequest;
+import com.jiraagentic.app.dto.ReorderSprintRequest;
 import com.jiraagentic.app.dto.SprintDto;
 import com.jiraagentic.app.service.SprintService;
 import lombok.RequiredArgsConstructor;
@@ -34,6 +36,19 @@ public class SprintController {
     @PutMapping("/{id}")
     public SprintDto update(@PathVariable Long id, @RequestBody CreateSprintRequest req) {
         return sprintService.update(id, req);
+    }
+
+    @PostMapping("/{id}/complete")
+    public SprintDto complete(@PathVariable Long id, @RequestBody(required = false) CompleteSprintRequest req) {
+        return sprintService.complete(id, req != null ? req : new CompleteSprintRequest());
+    }
+
+    @PostMapping("/{id}/reorder")
+    public List<SprintDto> reorder(
+            @PathVariable Long spaceId,
+            @PathVariable Long id,
+            @RequestBody ReorderSprintRequest req) {
+        return sprintService.reorder(spaceId, id, req);
     }
 
     @DeleteMapping("/{id}")

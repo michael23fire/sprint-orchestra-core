@@ -3,6 +3,9 @@ server:
   port: 8081
 
 spring:
+  application:
+    name: jira-agentic-ai
+
   datasource:
     url: jdbc:postgresql://localhost:5432/pocdb
     username: poc
@@ -45,12 +48,40 @@ spring:
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        # Publishes run on the request thread (AFTER_COMMIT listener). Default max.block.ms
+        # is 60s — a dead broker would hold every attachment upload response hostage until
+        # the gateway times out (503 fallback). Fail fast and just log the warning instead.
+        max.block.ms: ${SPRING_KAFKA_PRODUCER_MAX_BLOCK_MS:2000}
 
 springdoc:
   api-docs:
     path: /v3/api-docs
   swagger-ui:
     path: /swagger-ui.html
+
+management:
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+  endpoints:
+    web:
+      # Keep the public management surface small. Prometheus scrapes the metrics endpoint;
+      # deployment platforms use the health endpoints for liveness/readiness probes.
+      exposure:
+        include:
+          - health
+          - prometheus
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        # Also expose /actuator/health/liveness and /actuator/health/readiness outside Kubernetes.
+        enabled: true
+  metrics:
+    tags:
+      application: jira-backend
 
 app:
   kafka:

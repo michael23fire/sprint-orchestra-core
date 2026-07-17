@@ -27,6 +27,7 @@ replay_pid*
 # ========== Gradle / Java build ==========
 .gradle/
 **/build/
+**/bin/
 
 # ========== IntelliJ IDEA ==========
 .idea/
@@ -35,8 +36,8 @@ replay_pid*
 *.iws
 out/
 
-# Shared run configs: keep .run/ tracked (comment line below to ignore personal configs)
-#.run/
+# Local IntelliJ run configurations
+.run/
 
 # ========== Secrets & local config ==========
 .env
@@ -46,7 +47,7 @@ out/
 **/application-local.properties
 docker-compose.override.yml
 
-# ========== Python (scripts/) ==========
+# ========== Python ==========
 __pycache__/
 *.py[cod]
 .venv/

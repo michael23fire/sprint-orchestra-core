@@ -15,8 +15,10 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @Service
@@ -34,7 +36,6 @@ public class IssueService {
     private final IssueAttachmentService issueAttachmentService;
     private final IssueCodeLinkService issueCodeLinkService;
     private final IssueCodeLinkRepository issueCodeLinkRepository;
-    private final WorkLogRepository workLogRepository;
     private final IssueHistoryRepository issueHistoryRepository;
     private final ActiveSpaceGuard activeSpaceGuard;
 
@@ -89,7 +90,7 @@ public class IssueService {
         issue.setStoryPoints(req.getStoryPoints());
         issue.setStartDate(req.getStartDate());
         issue.setDueDate(req.getDueDate());
-        issue.setLabels(req.getLabels() != null ? req.getLabels() : List.of());
+        issue.setLabels(new ArrayList<>(sanitizeLabels(req.getLabels())));
 
         Long reporterId = req.getReporterId() != null ? req.getReporterId() : creatorUserId;
         if (reporterId != null) {
@@ -104,7 +105,7 @@ public class IssueService {
         }
 
         applyEpicInvariants(issue);
-        assertSubtaskNotParentedOnEpic(issue);
+        assertValidSubtaskParent(issue);
 
         Issue saved = issueRepository.save(issue);
         issueHistoryService.recordEvent(saved, creatorUserId, "issue_created", "Issue created");
@@ -134,14 +135,32 @@ public class IssueService {
 
         if (req.getTitle() != null) issue.setTitle(req.getTitle());
         if (req.getDescription() != null) issue.setDescription(req.getDescription());
-        if (req.getIssueType() != null) issue.setIssueType(req.getIssueType());
+        if (req.getIssueType() != null) {
+            boolean wasSubtask = isSubtaskType(oldIssueType);
+            boolean willBeSubtask = isSubtaskType(req.getIssueType());
+            if (!wasSubtask && willBeSubtask) {
+                throw new IllegalArgumentException(
+                        "An existing issue cannot be converted to a subtask; create it from a parent issue.");
+            }
+            if (wasSubtask && !willBeSubtask && issue.getParent() != null) {
+                throw new IllegalArgumentException(
+                        "Subtask issue type cannot be changed once the issue is a subtask.");
+            }
+            issue.setIssueType(req.getIssueType());
+        }
         if (req.getStatus() != null) issue.setStatus(req.getStatus());
         if (req.getPriority() != null) issue.setPriority(req.getPriority());
         if (req.getStoryPoints() != null) issue.setStoryPoints(req.getStoryPoints());
         if (req.getStartDate() != null) issue.setStartDate(req.getStartDate());
         if (req.getDueDate() != null) issue.setDueDate(req.getDueDate());
         if (req.getIssueOrder() != null) issue.setIssueOrder(req.getIssueOrder());
-        if (req.getLabels() != null) issue.setLabels(req.getLabels());
+        if (req.getLabels() != null) {
+            // Hibernate owns this @ElementCollection. Mutate its managed bag
+            // instead of replacing it with an immutable List.of(), which
+            // throws UnsupportedOperationException during dirty checking.
+            issue.getLabels().clear();
+            issue.getLabels().addAll(sanitizeLabels(req.getLabels()));
+        }
 
         if (Boolean.TRUE.equals(req.getClearAssignee())) {
             issue.setAssignee(null);
@@ -165,7 +184,7 @@ public class IssueService {
         }
 
         applyEpicInvariants(issue);
-        assertSubtaskNotParentedOnEpic(issue);
+        assertValidSubtaskParent(issue);
 
         issueHistoryService.recordFieldChange(issue, actorUserId, "title", oldTitle, issue.getTitle());
         issueHistoryService.recordFieldChange(issue, actorUserId, "description", oldDescription, issue.getDescription());
@@ -212,6 +231,21 @@ public class IssueService {
         return issueType != null && "subtask".equalsIgnoreCase(issueType);
     }
 
+    /** Work types are first-class fields; do not persist duplicate type-like labels. */
+    private static List<String> sanitizeLabels(List<String> labels) {
+        if (labels == null || labels.isEmpty()) {
+            return new ArrayList<>();
+        }
+        Set<String> reserved = Set.of("bug", "story", "epic");
+        return labels.stream()
+                .filter(Objects::nonNull)
+                .map(String::trim)
+                .filter(label -> !label.isEmpty())
+                .filter(label -> !reserved.contains(label.toLowerCase(Locale.ROOT)))
+                .distinct()
+                .collect(Collectors.toCollection(ArrayList::new));
+    }
+
     /**
      * Jira-style: epics are backlog-level containers — no parent, never on a sprint.
      */
@@ -223,9 +257,13 @@ public class IssueService {
         issue.setSprint(null);
     }
 
-    private void assertSubtaskNotParentedOnEpic(Issue issue) {
-        if (!isSubtaskType(issue.getIssueType()) || issue.getParent() == null) {
+    private void assertValidSubtaskParent(Issue issue) {
+        if (!isSubtaskType(issue.getIssueType())) {
             return;
+        }
+        if (issue.getParent() == null) {
+            throw new IllegalArgumentException(
+                    "A subtask must have a parent issue; use Create child issue on the parent.");
         }
         if (isEpicType(issue.getParent().getIssueType())) {
             throw new IllegalArgumentException(
@@ -259,7 +297,6 @@ public class IssueService {
     private void purgeIssueDependencies(Long issueId) {
         issueLinkRepository.deleteAllInvolvingIssue(issueId);
         commentRepository.deleteByIssue_Id(issueId);
-        workLogRepository.deleteByIssue_Id(issueId);
         issueHistoryRepository.deleteByIssue_Id(issueId);
         issueCodeLinkRepository.deleteByIssue_Id(issueId);
         issueAttachmentService.purgeAttachmentsForIssue(issueId);

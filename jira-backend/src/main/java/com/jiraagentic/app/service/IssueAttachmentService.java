@@ -12,6 +12,7 @@ import com.jiraagentic.app.repository.CommentRepository;
 import com.jiraagentic.app.repository.UserRepository;
 import com.jiraagentic.app.util.AttachmentReferenceExtractor;
 import lombok.RequiredArgsConstructor;
+import java.nio.charset.StandardCharsets;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.core.io.ByteArrayResource;
@@ -129,7 +130,9 @@ public class IssueAttachmentService {
         return ResponseEntity.ok()
                 .contentType(mediaType)
                 .contentLength(bytes.length)
-                .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment().filename(attachment.getOriginalFilename()).build().toString())
+                // RFC 5987 (filename*=UTF-8''…) — raw non-Latin-1 names (e.g. macOS screenshots
+                // contain U+202F before AM/PM) blow up Tomcat's header encoder otherwise.
+                .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment().filename(attachment.getOriginalFilename(), StandardCharsets.UTF_8).build().toString())
                 .body(new ByteArrayResource(bytes));
     }
 

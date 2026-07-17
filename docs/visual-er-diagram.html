@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Visual ER diagram — Jira Agentic AI (core schema)</title>
+  <style>
+    :root {
+      color-scheme: dark light;
+      --bg: #0f1419;
+      --fg: #e6edf3;
+      --muted: #8b949e;
+      --border: #30363d;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f6f8fa;
+        --fg: #1f2328;
+        --muted: #59636e;
+        --border: #d1d9e0;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.5;
+    }
+    header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      max-width: 120rem;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 1.125rem;
+      font-weight: 600;
+      margin: 0 0 0.35rem;
+    }
+    p {
+      margin: 0;
+      font-size: 0.8125rem;
+      color: var(--muted);
+      max-width: 110ch;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    .schema-notes {
+      margin-top: 0.75rem;
+      padding-top: 0.75rem;
+      border-top: 1px solid var(--border);
+    }
+    .schema-notes strong {
+      color: var(--fg);
+    }
+    .wrap {
+      padding: 1rem;
+      overflow: auto;
+      min-height: calc(100vh - 5rem);
+    }
+    .mermaid {
+      display: flex;
+      justify-content: flex-start;
+      min-width: min(100%, 1400px);
+    }
+    .err {
+      color: #f85149;
+      padding: 1rem;
+      font-size: 0.875rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Entity–relationship diagram (visual)</h1>
+    <p>
+      Complete view of the current Flyway <code>V1</code>–<code>V17</code> schema: 15 application tables, 119 columns,
+      and 26 foreign-key relationships. Each entity includes every persisted column; nullable and default values are
+      noted inline. Nullable relationships include
+      <code>spaces.owner_id</code>, <code>issues.sprint_id</code> / <code>parent_id</code> / <code>assignee_id</code> /
+      <code>reporter_id</code>, <code>issue_history.actor_id</code>, <code>issue_attachments.uploader_id</code>,
+      <code>issue_code_links.creator_id</code>. Junction tables implement logical many-to-many between users, spaces,
+      and groups. See <code>DATABASE_SCHEMA_CORE_FINAL_v1.md</code> for migration history and index details. Mermaid
+      loads from jsDelivr (network once unless cached).
+    </p>
+    <p class="schema-notes">
+      <strong>Unique keys:</strong>
+      <code>users(username)</code>, <code>users(email)</code>, <code>issues(issue_key)</code>, and
+      <code>issue_attachments(storage_filename)</code>. Partial unique indexes apply to non-null
+      <code>users.google_sub</code>, non-null <code>users.github_id</code>, and active <code>spaces.space_key</code>
+      (<code>deleted_at IS NULL</code>). Composite unique keys are shown in entity comments for memberships,
+      space/group and repository links, issue links, and issue code links.
+    </p>
+  </header>
+  <div class="wrap">
+    <div class="mermaid">
+erDiagram
+  users {
+    bigint id PK "identity"
+    varchar(50) username UK
+    varchar(100) name
+    varchar(150) email UK
+    varchar(100) password "nullable"
+    varchar(100) avatar_color "nullable"
+    timestamptz(6) created_at
+    timestamptz(6) updated_at
+    varchar(255) google_sub UK "nullable; partial unique when present; legacy column"
+    varchar(255) github_id UK "nullable; partial unique when present"
+  }
+  spaces {
+    bigint id PK "identity"
+    varchar(100) name
+    varchar(20) space_key UK "partial unique while active"
+    varchar(30) color "nullable"
+    bigint owner_id FK "nullable"
+    integer issue_counter
+    timestamptz(6) created_at
+    timestamptz(6) updated_at
+    text github_pat "nullable"
+    timestamptz(6) deleted_at "nullable"
+  }
+  user_groups {
+    bigint id PK "identity"
+    varchar(100) name
+    varchar(255) description "nullable"
+    bigint owner_id FK
+    timestamptz(6) created_at
+    timestamptz(6) updated_at
+  }
+  space_members {
+    bigint id PK "identity"
+    bigint space_id FK "composite unique with user_id"
+    bigint user_id FK "composite unique with space_id"
+    varchar(20) role
+    timestamptz(6) joined_at
+  }
+  group_members {
+    bigint id PK "identity"
+    bigint group_id FK "composite unique with user_id"
+    bigint user_id FK "composite unique with group_id"
+    varchar(20) role
+    timestamptz(6) joined_at
+  }
+  space_groups {
+    bigint id PK "identity"
+    bigint space_id FK "composite unique with group_id"
+    bigint group_id FK "composite unique with space_id"
+    timestamptz(6) added_at
+  }
+  space_github_repos {
+    bigint id PK "identity"
+    bigint space_id FK "composite unique with owner and repo"
+    varchar(120) owner "composite unique with space_id and repo"
+    varchar(200) repo "composite unique with space_id and owner"
+    timestamptz(6) created_at
+    timestamptz(6) last_scanned_at "nullable"
+  }
+  sprints {
+    bigint id PK "identity"
+    bigint space_id FK
+    varchar(100) name
+    text goal "nullable"
+    date start_date "nullable"
+    date end_date "nullable"
+    varchar(20) status
+    timestamptz(6) created_at
+    timestamptz(6) updated_at
+    integer sprint_order "default 0"
+  }
+  issues {
+    bigint id PK "identity"
+    varchar(30) issue_key UK
+    bigint space_id FK
+    bigint sprint_id FK "nullable"
+    bigint parent_id FK "nullable"
+    varchar(255) title
+    text description "nullable"
+    varchar(20) issue_type
+    varchar(20) status
+    varchar(20) priority "nullable"
+    bigint assignee_id FK "nullable"
+    bigint reporter_id FK "nullable"
+    integer story_points "nullable"
+    date start_date "nullable"
+    date due_date "nullable"
+    integer issue_order "nullable"
+    timestamptz(6) created_at
+    timestamptz(6) updated_at
+  }
+  issue_labels {
+    bigint issue_id FK
+    varchar(50) label
+  }
+  comments {
+    bigint id PK "identity"
+    bigint issue_id FK
+    bigint author_id FK
+    text content
+    timestamptz(6) created_at
+    timestamptz(6) updated_at
+  }
+  issue_history {
+    bigint id PK "identity"
+    bigint issue_id FK
+    bigint actor_id FK "nullable"
+    varchar(30) event_type
+    varchar(50) field_name "nullable"
+    text from_value "nullable"
+    text to_value "nullable"
+    text description "nullable"
+    timestamptz(6) created_at
+  }
+  issue_links {
+    bigint id PK "identity"
+    bigint source_issue_id FK "composite unique with target_issue_id and link_type"
+    bigint target_issue_id FK "composite unique with source_issue_id and link_type"
+    varchar(30) link_type "composite unique with source_issue_id and target_issue_id"
+    timestamptz(6) created_at
+  }
+  issue_attachments {
+    bigint id PK "identity"
+    bigint issue_id FK
+    bigint uploader_id FK "nullable"
+    varchar(255) original_filename
+    varchar(255) storage_filename UK
+    varchar(120) content_type "nullable"
+    bigint size_bytes
+    timestamptz(6) created_at
+    boolean list_in_attachment_panel "default true"
+  }
+  issue_code_links {
+    bigint id PK "identity"
+    bigint issue_id FK
+    bigint creator_id FK "nullable"
+    varchar(1024) url "composite unique with issue_id"
+    varchar(30) kind
+    varchar(30) provider "default github"
+    varchar(120) owner "nullable"
+    varchar(200) repo "nullable"
+    varchar(200) ref_id "nullable"
+    varchar(500) title "nullable"
+    varchar(40) state "nullable"
+    varchar(120) author_login "nullable"
+    timestamptz(6) created_at
+    timestamptz(6) last_activity_at "nullable"
+  }
+
+  users |o--o{ spaces : "owner_id"
+  users ||--o{ user_groups : "owner_id"
+  users ||--o{ space_members : "user_id"
+  spaces ||--o{ space_members : "space_id"
+  users ||--o{ group_members : "user_id"
+  user_groups ||--o{ group_members : "group_id"
+  spaces ||--o{ space_groups : "space_id"
+  user_groups ||--o{ space_groups : "group_id"
+  spaces ||--o{ space_github_repos : "space_id"
+  spaces ||--o{ sprints : "space_id"
+  spaces ||--o{ issues : "space_id"
+  sprints |o--o{ issues : "sprint_id"
+  issues |o--o{ issues : "parent_id"
+  users |o--o{ issues : "assignee_id"
+  users |o--o{ issues : "reporter_id"
+  issues ||--o{ issue_labels : "issue_id"
+  issues ||--o{ comments : "issue_id"
+  users ||--o{ comments : "author_id"
+  issues ||--o{ issue_history : "issue_id"
+  users |o--o{ issue_history : "actor_id"
+  issues ||--o{ issue_links : "source_issue_id"
+  issues ||--o{ issue_links : "target_issue_id"
+  issues ||--o{ issue_attachments : "issue_id"
+  users |o--o{ issue_attachments : "uploader_id"
+  issues ||--o{ issue_code_links : "issue_id"
+  users |o--o{ issue_code_links : "creator_id"
+    </div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    (function () {
+      var dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+      mermaid.initialize({
+        startOnLoad: true,
+        theme: dark ? "dark" : "neutral",
+        er: { useMaxWidth: false },
+      });
+    })();
+  </script>
+</body>
+</html>

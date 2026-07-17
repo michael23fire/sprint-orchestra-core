@@ -1,6 +1,6 @@
 # Jira Agentic AI
 
-Full-stack **Jira-style** workspace demo: **Spring Boot 3** REST API plus a **React (Vite)** SPA that lives in a **separate repository** (`jira-agentic-ai-web`), with **PostgreSQL**, **Redis** cache, **Flyway** migrations, and **JWT** (OAuth2 Resource Server) for protected APIs.
+Full-stack **Jira-style** workspace demo: **Spring Boot 3** REST API plus a **React (Vite)** SPA that lives in a **separate repository** (`jira-agentic-ai-web`), with **PostgreSQL**, **Redis** cache, **Flyway** migrations, and gateway-side **JWT** validation (OAuth2 Resource Server) for protected APIs.
 
 ---
 
@@ -24,7 +24,7 @@ Full-stack **Jira-style** workspace demo: **Spring Boot 3** REST API plus a **Re
 - [Security notes](#security-notes)
 - [Troubleshooting](#troubleshooting)
 - [Attachments, deletes & Kafka](#attachments-deletes--kafka)
-- [Target platform architecture](./ARCHITECTURE.md)
+- [Target platform architecture](./docs/ARCHITECTURE.md)
 
 ---
 
@@ -35,7 +35,7 @@ Full-stack **Jira-style** workspace demo: **Spring Boot 3** REST API plus a **Re
 - **GitHub repo integration** + issue code links + metadata refresh flows
 - **JWT** issued via `POST /api/auth/token`; SPA stores token and sends `Authorization: Bearer …`
 - **Redis**-backed Spring Cache for user-by-id reads (TTL aligned with `application.yml`)
-- **Flyway** for versioned schema (`V1`..`V10`); JPA `ddl-auto: validate` in default config
+- **Flyway** for versioned schema (`V1`..`V17`); JPA `ddl-auto: validate` in default config
 - **springdoc-openapi** + Swagger UI for API exploration
 
 ---
@@ -65,9 +65,11 @@ jira-agentic-ai/
 ├── settings.gradle.kts             # multi-module: jira-backend + gateway + tmp-kafka-consumer-poc
 ├── gradlew / gradlew.bat
 ├── README.md
-├── ARCHITECTURE.md                  # Target platform: Gateway · Core · Kafka · Vectorization · AI · observability
-├── API_DESIGN_CORE_FINAL_v1.md
-├── DATABASE_SCHEMA_CORE_FINAL_v1.md
+├── docs/                            # Architecture, API design, schema, and ER diagram
+│   ├── ARCHITECTURE.md
+│   ├── API_DESIGN_CORE_FINAL_v1.md
+│   ├── DATABASE_SCHEMA_CORE_FINAL_v1.md
+│   └── visual-er-diagram.html
 ├── jira-backend/                   # Spring Boot REST API (main app)
 │   ├── build.gradle.kts
 │   └── src/
@@ -88,15 +90,16 @@ The **SPA** is not in this tree: clone or check out **`jira-agentic-ai-web`** (s
 
 ## Core docs
 
-- Target architecture (Kafka / vectorization / AI / observability): `ARCHITECTURE.md`
-- API design: `API_DESIGN_CORE_FINAL_v1.md`
-- Database schema: `DATABASE_SCHEMA_CORE_FINAL_v1.md`
+- [Target architecture](./docs/ARCHITECTURE.md) (Kafka / vectorization / AI / observability)
+- [API design](./docs/API_DESIGN_CORE_FINAL_v1.md)
+- [Database schema](./docs/DATABASE_SCHEMA_CORE_FINAL_v1.md)
+- [Visual ER diagram](./docs/visual-er-diagram.html)
 
 ---
 
 ## Architecture
 
-**Target platform view**（Gateway、合併後核心服務、Kafka、獨立 Vectorization / AI、可觀測性模型）見 **`ARCHITECTURE.md`**。
+**Target platform view**（Gateway、合併後核心服務、Kafka、獨立 Vectorization / AI、可觀測性模型）見 **[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)**。
 
 下列圖表侧重 **目前 repo 已落地的** Spring monolith 與資料路徑。
 
@@ -205,11 +208,11 @@ MinIO console: `http://localhost:9001`
 
 **Kafka (optional):** When **`APP_KAFKA_ATTACHMENT_INGESTION_ENABLED=true`**, **jira-backend** publishes a small **tracking JSON** after each successful attachment upload (topic **`jira.attachment.ingestion`**, override with **`APP_KAFKA_ATTACHMENT_INGESTION_TOPIC`**). Fields include **`eventId`**, **`eventType`**, **`issueKey`**, **`attachmentId`**, **`filename`**, **`byteSize`**, **`storageBackend`**, **`storageKey`**, **`emittedAt`**, etc., so you can correlate logs across services. Broker: **`SPRING_KAFKA_BOOTSTRAP_SERVERS`** (default `localhost:9092`).
 
-**Quick POC — prove messages are consumed:** with Compose Kafka up, enable the producer (`APP_KAFKA_ATTACHMENT_INGESTION_ENABLED=true`, e.g. IntelliJ run config **Backend (Kafka ingestion)**), run **`./gradlew :jira-backend:bootRun`**, then **`./gradlew :tmp-kafka-consumer-poc:bootRun`**. Trigger an attachment **upload** (see SPA behaviour below) and watch the **Tmp Kafka POC** Run console for **`[tmp-kafka-consumer-poc]`** lines (**`System.out`** + SLF4J).
+**Quick POC — prove messages are consumed:** with Compose Kafka up, enable the producer (`APP_KAFKA_ATTACHMENT_INGESTION_ENABLED=true` in your environment), run **`./gradlew :jira-backend:bootRun`**, then **`./gradlew :tmp-kafka-consumer-poc:bootRun`**. Trigger an attachment **upload** (see SPA behaviour below) and watch the **Tmp Kafka POC** console for **`[tmp-kafka-consumer-poc]`** lines (**`System.out`** + SLF4J).
 
 **Kafka UI:** open **`http://localhost:8989`** → cluster **local** → **Topics** → **`jira.attachment.ingestion`** (or your `APP_KAFKA_ATTACHMENT_INGESTION_TOPIC`) → **Messages** to inspect payloads / offsets.
 
-**IntelliJ:** shared run configs live under **`.run/`**. **Gateway + Backend + Tmp Kafka POC** starts **Backend (Kafka ingestion)** (Kafka publishing on), **Gateway**, then **Tmp Kafka POC**. Reload Gradle if modules are missing.
+**Local credentials:** provide OAuth credentials and other secrets through environment variables. IntelliJ `.run/` configurations are gitignored; never commit credentials in run configurations or project files.
 
 ### 2. Run the backend
 
@@ -293,10 +296,14 @@ Current local defaults in `application.yml`:
 
 ## Database & Flyway
 
-- Scripts live under **`jira-backend/src/main/resources/db/migration/`** (`V1`..`V10`).
+- Scripts live under **`jira-backend/src/main/resources/db/migration/`** (`V1`..`V17`).
 - **`spring.jpa.hibernate.ddl-auto: validate`** — schema is **not** auto-updated by Hibernate at runtime; it must match entities + migrations.
 - **`spring.flyway.baseline-on-migrate: true`** + **`baseline-version: 1`**: if the database **already contains tables** but no `flyway_schema_history`, Flyway will **baseline** at version 1 and **skip** `V1` (assumes schema already matches). For a **truly empty** database, Flyway applies `V1` normally.
 - `V10` introduces **space soft-delete** (`spaces.deleted_at`) and active-only unique key index for `space_key`.
+- `V11`–`V14` add user OAuth identifiers and normalize local seed-account data.
+- `V15` removes the obsolete `work_logs` table.
+- `V16` adds per-space `sprints.sprint_order` for backlog ordering.
+- `V17` removes type-like values (`bug`, `story`, `epic`) from issue labels; issue type remains in `issues.issue_type`.
 
 **New environment:** empty database → Flyway runs migrations from scratch.  
 **Existing environment:** ensure baseline/migrations match reality; otherwise repair or migrate intentionally.
@@ -306,17 +313,18 @@ Current local defaults in `application.yml`:
 ## Authentication & authorization
 
 1. **Login for SPA:** `POST /api/auth/token` with JSON `{ "username", "password" }` → returns JWT + user payload (`AuthTokenResponse`).
-2. **Subsequent API calls:** header `Authorization: Bearer <token>`.
-3. **Spring Security:** OAuth2 Resource Server (JWT decoder) secures **`/api/**`** except paths explicitly permitted (see `SecurityConfig`).
+2. **Subsequent API calls:** send `Authorization: Bearer <token>` to the gateway.
+3. **Gateway:** validates the JWT, removes the client authorization header, and forwards trusted user identity headers to the backend.
+4. **Backend:** accepts the gateway trust header and uses forwarded identity for protected **`/api/**`** routes.
 
-**Public (no JWT) in current code** (intended for dev / onboarding — **tighten before production**):
+**Public at the gateway (no JWT) in current code** (intended for dev / onboarding — **tighten before production**):
 
 - `/api/auth/**`
-- `/api/users/**` (full user CRUD is **permitAll** today)
+- `/api/users/**` (list/get/create/delete are **permitAll** today)
 - Swagger/OpenAPI paths
 - `/oauth2/**`, `/login/**` when OAuth2 client is configured
 
-All other **`/api/*`** routes require a valid JWT.
+All other **`/api/*`** routes require a valid JWT at the gateway. Direct backend calls still require the configured internal gateway trust header.
 
 ---
 
@@ -326,14 +334,13 @@ Base URL: **`/api`**
 
 | Area | Base path |
 |------|-----------|
-| Auth | `POST /api/auth/login`, `POST /api/auth/token`, `GET /api/auth/oauth2/status` |
+| Auth | `GET /api/auth/config`, `POST /api/auth/token` |
 | Users | `/api/users` |
 | Groups | `/api/groups`, `/api/groups/{id}/members`, … |
 | Spaces | `/api/spaces`, `.../members`, `.../groups` |
-| Sprints | `/api/spaces/{spaceId}/sprints` |
+| Sprints | `/api/spaces/{spaceId}/sprints`, `.../{id}/complete`, `.../{id}/reorder` |
 | Issues | `/api/spaces/{spaceId}/issues` |
 | Comments | `/api/issues/{issueId}/comments` (`issueId` = numeric issue id) |
-| Demo | `GET /api/secure/ping` (protected) |
 
 Exact verbs and bodies: use **Swagger** or read controller classes under `controller/`.
 

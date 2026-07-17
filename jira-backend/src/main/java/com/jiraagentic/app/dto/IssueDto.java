@@ -36,6 +36,8 @@ public class IssueDto {
     private List<IssueCodeLinkDto> codeLinks;
     /** When the issue row was created — used for status lifecycle / time-in-stage. */
     private Instant createdAt;
+    /** Last time the issue row was updated. */
+    private Instant updatedAt;
 
     public static IssueDto from(Issue i) {
         IssueDto dto = new IssueDto();
@@ -69,6 +71,7 @@ public class IssueDto {
         dto.setIssueOrder(i.getIssueOrder());
         dto.setLabels(i.getLabels());
         dto.setCreatedAt(i.getCreatedAt());
+        dto.setUpdatedAt(i.getUpdatedAt());
         return dto;
     }
 }

@@ -38,6 +38,10 @@ public class Sprint implements Serializable {
     @Column(nullable = false, length = 20)
     private String status = "future";
 
+    /** Relative order within a space (used for future-sprint reordering on the backlog). */
+    @Column(name = "sprint_order", nullable = false)
+    private Integer sprintOrder = 0;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -48,6 +52,7 @@ public class Sprint implements Serializable {
     void onCreate() {
         createdAt = updatedAt = Instant.now();
         if (status == null) status = "future";
+        if (sprintOrder == null) sprintOrder = 0;
     }
 
     @PreUpdate

@@ -17,7 +17,6 @@
   - [Table: issue_labels](#table-issue_labels)
   - [Table: comments](#table-comments)
   - [Table: issue_history](#table-issue_history)
-  - [Table: work_logs](#table-work_logs)
   - [Table: issue_links](#table-issue_links)
   - [Table: issue_attachments](#table-issue_attachments)
   - [Table: issue_code_links](#table-issue_code_links)
@@ -31,6 +30,11 @@
 
 This document describes the **actual PostgreSQL schema currently used** by the Jira-like project, based on Flyway migrations:
 
+- Current application schema: **15 tables and 119 columns** (`flyway_schema_history` is Flyway metadata and is not catalogued below).
+- `V12` and `V14` are data-only user/seed migrations, so they do not add tables or columns.
+- `V15` removes the former `work_logs` table; it is intentionally absent from the current table catalog.
+- `V16` adds and backfills `sprints.sprint_order`; `V17` removes obsolete type-like label rows without removing `issue_labels`.
+
 - `V1__initial_schema.sql`
 - `V2__add_issue_history_and_work_logs.sql`
 - `V3__add_issue_links.sql`
@@ -41,6 +45,13 @@ This document describes the **actual PostgreSQL schema currently used** by the J
 - `V8__space_github_pat.sql`
 - `V9__issue_code_links_last_activity.sql`
 - `V10__space_soft_delete.sql`
+- `V11__users_google_sub.sql`
+- `V12__restore_seed_passwords.sql`
+- `V13__users_github_id.sql`
+- `V14__neutral_demo_user_email.sql`
+- `V15__drop_work_logs.sql`
+- `V16__sprint_order.sql`
+- `V17__remove_issue_type_labels.sql`
 
 ---
 
@@ -54,8 +65,10 @@ This document describes the **actual PostgreSQL schema currently used** by the J
 | username | VARCHAR(50) | UNIQUE, NOT NULL | Login username |
 | name | VARCHAR(100) | NOT NULL | Display name |
 | email | VARCHAR(150) | UNIQUE, NOT NULL | User email |
-| password | VARCHAR(100) | NULL | Password hash / auth field |
+| password | VARCHAR(100) | NULL | Password credential; current dev authentication compares plaintext (must be hashed before production) |
 | avatar_color | VARCHAR(100) | NULL | UI avatar color |
+| google_sub | VARCHAR(255) | UNIQUE when present, NULL | Legacy Google OAuth subject from V11; retained in PostgreSQL but not mapped by the current `User` entity |
+| github_id | VARCHAR(255) | UNIQUE when present, NULL | GitHub account id (V13) |
 | created_at | TIMESTAMPTZ(6) | NOT NULL | Created time |
 | updated_at | TIMESTAMPTZ(6) | NOT NULL | Updated time |
 
@@ -63,6 +76,8 @@ This document describes the **actual PostgreSQL schema currently used** by the J
 - `PRIMARY KEY (id)`
 - `UNIQUE (username)`
 - `UNIQUE (email)`
+- `UNIQUE INDEX uk_users_google_sub (google_sub) WHERE google_sub IS NOT NULL`
+- `UNIQUE INDEX uk_users_github_id (github_id) WHERE github_id IS NOT NULL`
 
 **SQL:**
 
@@ -79,6 +94,12 @@ CREATE TABLE users (
     CONSTRAINT uk_users_username UNIQUE (username),
     CONSTRAINT uk_users_email UNIQUE (email)
 );
+
+ALTER TABLE users ADD COLUMN google_sub VARCHAR(255);
+CREATE UNIQUE INDEX uk_users_google_sub ON users (google_sub) WHERE google_sub IS NOT NULL;
+
+ALTER TABLE users ADD COLUMN github_id VARCHAR(255);
+CREATE UNIQUE INDEX uk_users_github_id ON users (github_id) WHERE github_id IS NOT NULL;
 ```
 
 ---
@@ -260,6 +281,7 @@ CREATE TABLE space_groups (
 | start_date | DATE | NULL | Start date |
 | end_date | DATE | NULL | End date |
 | status | VARCHAR(20) | NOT NULL | Sprint status |
+| sprint_order | INTEGER | NOT NULL, default 0 | Manual future-sprint order within a space; V16 backfills all existing sprints |
 | created_at | TIMESTAMPTZ(6) | NOT NULL | Created time |
 | updated_at | TIMESTAMPTZ(6) | NOT NULL | Updated time |
 
@@ -278,6 +300,23 @@ CREATE TABLE sprints (
     updated_at TIMESTAMP(6) WITH TIME ZONE NOT NULL,
     CONSTRAINT fk_sprints_space FOREIGN KEY (space_id) REFERENCES spaces (id)
 );
+
+ALTER TABLE sprints
+    ADD COLUMN sprint_order INTEGER NOT NULL DEFAULT 0;
+
+WITH ranked AS (
+    SELECT
+        id,
+        ROW_NUMBER() OVER (
+            PARTITION BY space_id
+            ORDER BY start_date ASC NULLS LAST, id ASC
+        ) - 1 AS ord
+    FROM sprints
+)
+UPDATE sprints s
+SET sprint_order = ranked.ord
+FROM ranked
+WHERE s.id = ranked.id;
 ```
 
 ---
@@ -350,6 +389,9 @@ CREATE UNIQUE INDEX idx_issue_key ON issues (issue_key);
 
 ### Table: issue_labels
 
+`V17` removes legacy labels whose normalized value is `bug`, `story`, or `epic`. Those values belong in
+`issues.issue_type`; the table remains available for all other user-defined labels.
+
 | Column | Type | Constraints | Description |
 | --- | --- | --- | --- |
 | issue_id | BIGINT | FK -> issues(id), NOT NULL | Issue id |
@@ -368,6 +410,9 @@ CREATE TABLE issue_labels (
 );
 
 CREATE INDEX idx_issue_labels_issue ON issue_labels (issue_id);
+
+DELETE FROM issue_labels
+WHERE LOWER(TRIM(label)) IN ('bug', 'story', 'epic');
 ```
 
 ---
@@ -443,47 +488,6 @@ CREATE TABLE issue_history (
 CREATE INDEX idx_issue_history_issue ON issue_history (issue_id);
 CREATE INDEX idx_issue_history_created ON issue_history (created_at);
 ```
-
----
-
-### Table: work_logs
-
-| Column | Type | Constraints | Description |
-| --- | --- | --- | --- |
-| id | BIGINT | PK, identity | Work log id |
-| issue_id | BIGINT | FK -> issues(id), NOT NULL | Issue id |
-| author_id | BIGINT | FK -> users(id), NOT NULL | Author |
-| spent_minutes | INTEGER | NOT NULL | Time spent |
-| note | TEXT | NULL | Work note |
-| log_date | DATE | NOT NULL | Work date |
-| created_at | TIMESTAMPTZ(6) | NOT NULL | Created time |
-| updated_at | TIMESTAMPTZ(6) | NOT NULL | Updated time |
-
-**Indexes:**
-- `idx_worklog_issue (issue_id)`
-- `idx_worklog_log_date (log_date)`
-
-**SQL:**
-
-```sql
-CREATE TABLE work_logs (
-    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-    issue_id BIGINT NOT NULL,
-    author_id BIGINT NOT NULL,
-    spent_minutes INTEGER NOT NULL,
-    note TEXT,
-    log_date DATE NOT NULL,
-    created_at TIMESTAMP(6) WITH TIME ZONE NOT NULL,
-    updated_at TIMESTAMP(6) WITH TIME ZONE NOT NULL,
-    CONSTRAINT fk_work_logs_issue FOREIGN KEY (issue_id) REFERENCES issues (id),
-    CONSTRAINT fk_work_logs_author FOREIGN KEY (author_id) REFERENCES users (id)
-);
-
-CREATE INDEX idx_worklog_issue ON work_logs (issue_id);
-CREATE INDEX idx_worklog_log_date ON work_logs (log_date);
-```
-
----
 
 ### Table: issue_links
 
@@ -659,7 +663,7 @@ CREATE INDEX idx_space_github_repos_space ON space_github_repos (space_id);
 
 - `spaces` -> `sprints` (1:N)
 - `spaces` -> `issues` (1:N)
-- `issues` -> `comments` / `work_logs` / `issue_history` / `issue_attachments` / `issue_code_links` (1:N)
+- `issues` -> `comments` / `issue_history` / `issue_attachments` / `issue_code_links` (1:N)
 
 This is the core work-management domain path.
 
@@ -689,7 +693,7 @@ Used for dependency graph and cross-ticket traceability.
 ## Notes on Implementation
 
 1. **Schema ownership**
-   - Schema is managed by Flyway migrations (`V1`..`V10`)
+   - Schema is managed by Flyway migrations (`V1`..`V17`)
    - JPA is configured with validation mode (`ddl-auto: validate`)
 
 2. **Issue identifiers**
@@ -717,3 +721,5 @@ Used for dependency graph and cross-ticket traceability.
    - No broad cascade chains are defined in current schema; deletes should be orchestrated by service logic
    - `spaces` uses soft-delete semantics via `deleted_at` with active-row uniqueness on `space_key`
 
+8. **Removed work-log feature**
+   - `V15` drops the legacy `work_logs` table; it is not part of the current schema

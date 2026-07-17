@@ -13,6 +13,7 @@ public class SprintDto {
     private LocalDate startDate;
     private LocalDate endDate;
     private String status;
+    private Integer sprintOrder;
 
     public static SprintDto from(Sprint s) {
         SprintDto dto = new SprintDto();
@@ -23,6 +24,7 @@ public class SprintDto {
         dto.setStartDate(s.getStartDate());
         dto.setEndDate(s.getEndDate());
         dto.setStatus(s.getStatus());
+        dto.setSprintOrder(s.getSprintOrder());
         return dto;
     }
 }

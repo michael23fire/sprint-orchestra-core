@@ -21,6 +21,13 @@ spring:
       httpclient:
         connect-timeout: ${GATEWAY_HTTP_CONNECT_TIMEOUT_MS:5000}
         response-timeout: ${GATEWAY_HTTP_RESPONSE_TIMEOUT:10s}
+        pool:
+          # Tomcat (8081) closes idle keep-alive connections after ~60s. Without an idle cap the
+          # Netty pool reuses those half-closed connections; GETs are transparently retried but
+          # POSTs (e.g. multipart attachment uploads composed after a pause) fail with
+          # PrematureCloseException and surface as the CircuitBreaker fallback 503.
+          max-idle-time: ${GATEWAY_POOL_MAX_IDLE_TIME:10s}
+          eviction-interval: ${GATEWAY_POOL_EVICTION_INTERVAL:5s}
 
       # Avoid duplicate Access-Control-* when the backend also adds CORS (e.g. CorsFilter on 8081).
       default-filters:
@@ -47,6 +54,21 @@ spring:
             allow-credentials: true
 
       routes:
+        # Long-running GitHub operations (scan / bulk import / refresh) can take far longer
+        # than the default 1s CircuitBreaker TimeLimiter and 10s httpclient timeout, which
+        # otherwise trip the fallback ("Service temporarily unavailable"). Must precede backend-api.
+        - id: backend-github-long-ops
+          uri: http://127.0.0.1:8081
+          predicates:
+            - Path=/api/spaces/*/github-repos/scan,/api/spaces/*/github-repos/bulk,/api/spaces/*/code-links/refresh,/api/issues/*/code-links/refresh,/api/code-links/*/refresh
+          metadata:
+            response-timeout: ${GATEWAY_SCAN_RESPONSE_TIMEOUT_MS:120000}
+            connect-timeout: ${GATEWAY_HTTP_CONNECT_TIMEOUT_MS:5000}
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: backendScan
+                fallbackUri: forward:/fallback
         - id: backend-api
           uri: http://127.0.0.1:8081
           predicates:
@@ -108,3 +130,17 @@ resilience4j:
         failureRateThreshold: ${GATEWAY_CB_FAILURE_RATE:50}
         waitDurationInOpenState: ${GATEWAY_CB_OPEN_WAIT:30s}
         permittedNumberOfCallsInHalfOpenState: ${GATEWAY_CB_HALF_OPEN_CALLS:5}
+      backendScan:
+        slidingWindowSize: ${GATEWAY_SCAN_CB_SLIDING_WINDOW:10}
+        minimumNumberOfCalls: ${GATEWAY_SCAN_CB_MIN_CALLS:5}
+        failureRateThreshold: ${GATEWAY_SCAN_CB_FAILURE_RATE:50}
+        waitDurationInOpenState: ${GATEWAY_SCAN_CB_OPEN_WAIT:30s}
+        permittedNumberOfCallsInHalfOpenState: ${GATEWAY_SCAN_CB_HALF_OPEN_CALLS:3}
+  # Spring Cloud Gateway's CircuitBreaker filter wraps calls in a TimeLimiter (default 1s).
+  # Raise it so normal APIs get a sane bound and long GitHub ops don't time out prematurely.
+  timelimiter:
+    instances:
+      backendApi:
+        timeoutDuration: ${GATEWAY_CB_TIMEOUT:10s}
+      backendScan:
+        timeoutDuration: ${GATEWAY_SCAN_CB_TIMEOUT:120s}

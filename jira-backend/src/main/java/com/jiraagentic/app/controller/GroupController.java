@@ -1,9 +1,11 @@
 package com.jiraagentic.app.controller;
 
 import com.jiraagentic.app.dto.*;
+import com.jiraagentic.app.security.AuthSupport;
 import com.jiraagentic.app.service.GroupService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -33,13 +35,16 @@ public class GroupController {
     }
 
     @PutMapping("/{id}")
-    public GroupDto update(@PathVariable Long id, @RequestBody CreateGroupRequest req) {
-        return groupService.update(id, req);
+    public GroupDto update(
+            @PathVariable Long id,
+            @RequestBody CreateGroupRequest req,
+            Authentication authentication) {
+        return groupService.update(id, req, AuthSupport.extractUid(authentication));
     }
 
     @DeleteMapping("/{id}")
-    public ResponseEntity<Void> delete(@PathVariable Long id) {
-        groupService.delete(id);
+    public ResponseEntity<Void> delete(@PathVariable Long id, Authentication authentication) {
+        groupService.delete(id, AuthSupport.extractUid(authentication));
         return ResponseEntity.noContent().build();
     }
 
@@ -49,14 +54,20 @@ public class GroupController {
     }
 
     @PostMapping("/{id}/members")
-    public ResponseEntity<Void> addMember(@PathVariable Long id, @RequestBody Map<String, Long> body) {
-        groupService.addMember(id, body.get("userId"));
+    public ResponseEntity<Void> addMember(
+            @PathVariable Long id,
+            @RequestBody Map<String, Long> body,
+            Authentication authentication) {
+        groupService.addMember(id, body.get("userId"), AuthSupport.extractUid(authentication));
         return ResponseEntity.ok().build();
     }
 
     @DeleteMapping("/{id}/members/{userId}")
-    public ResponseEntity<Void> removeMember(@PathVariable Long id, @PathVariable Long userId) {
-        groupService.removeMember(id, userId);
+    public ResponseEntity<Void> removeMember(
+            @PathVariable Long id,
+            @PathVariable Long userId,
+            Authentication authentication) {
+        groupService.removeMember(id, userId, AuthSupport.extractUid(authentication));
         return ResponseEntity.noContent().build();
     }
 }

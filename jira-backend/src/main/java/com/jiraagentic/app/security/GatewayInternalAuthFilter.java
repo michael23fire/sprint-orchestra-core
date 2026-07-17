@@ -33,7 +33,10 @@ public class GatewayInternalAuthFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = request.getRequestURI();
-        return path.startsWith("/error");
+        return path.startsWith("/error")
+                || "/actuator/health".equals(path)
+                || path.startsWith("/actuator/health/")
+                || "/actuator/prometheus".equals(path);
     }
 
     @Override

@@ -64,16 +64,50 @@ public class GithubMetadataClient {
 
     /**
      * @param tokenOverride optional PAT for this call only; if blank, uses {@link #token}.
+     * @throws RuntimeException when a <em>user-supplied</em> token is rejected (401/403) — callers must not
+     *         treat that as “account not found”. A bad server {@code GITHUB_TOKEN} is ignored for public lookups.
      */
     public boolean accountExists(String login, String tokenOverride) {
         if (login == null || login.isBlank()) return false;
+        boolean userSuppliedPat = tokenOverride != null && !tokenOverride.isBlank();
         try {
-            JsonNode n = get("/users/" + trimLogin(login), tokenOverride);
+            HttpResponse<String> res = rawGet("/users/" + trimLogin(login), tokenOverride, userSuppliedPat);
+            if (res == null) return false;
+            int code = res.statusCode();
+            if (code == 404) return false;
+            if (code == 401 || code == 403) {
+                if (userSuppliedPat) {
+                    throw new RuntimeException(
+                            "GitHub rejected the token (HTTP " + code + "). Check that the PAT is valid and has not expired.");
+                }
+                // Configured server token may be invalid — retry anonymously for public account lookup.
+                res = rawGet("/users/" + trimLogin(login), null, false);
+                if (res == null) return false;
+                code = res.statusCode();
+                if (code == 404 || code == 401 || code == 403 || code / 100 != 2) return false;
+                JsonNode n = mapper.readTree(res.body());
+                return n != null && n.hasNonNull("id");
+            }
+            if (code / 100 != 2) return false;
+            JsonNode n = mapper.readTree(res.body());
             return n != null && n.hasNonNull("id");
+        } catch (RuntimeException ex) {
+            throw ex;
         } catch (Exception ex) {
             log.debug("GitHub accountExists failed for {}: {}", login, ex.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Validates a user-supplied PAT via {@code GET /user}.
+     * Call this before import when the user pasted a token so failures are not
+     * misreported as “account not found”.
+     *
+     * @return the GitHub login that owns the token
+     */
+    public String requireValidTokenActor(String tokenOverride) {
+        return requireTokenActorLogin(tokenOverride);
     }
 
     /**
@@ -90,31 +124,51 @@ public class GithubMetadataClient {
     }
 
     /**
-     * @param tokenOverride optional PAT for this call only (e.g. bulk import); if blank, uses configured token.
+     * @param tokenOverride optional <em>user-supplied</em> PAT for this call (e.g. bulk import).
+     *                      When blank, only <strong>public</strong> owned repos are listed — the server
+     *                      {@code GITHUB_TOKEN} is not used to force a private listing (that previously
+     *                      caused “PAT” errors on public-only imports).
      */
     public List<GithubRepoRef> listReposForAccount(String login, String tokenOverride) {
         if (login == null || login.isBlank()) return Collections.emptyList();
         String sanitized = trimLogin(login);
+        boolean userSuppliedPat = tokenOverride != null && !tokenOverride.isBlank();
         try {
-            JsonNode meta = get("/users/" + sanitized, tokenOverride);
+            // Public import must not depend on a possibly-invalid server GITHUB_TOKEN.
+            JsonNode meta = get("/users/" + sanitized, tokenOverride, userSuppliedPat);
+            if (meta == null || !meta.has("type")) {
+                if (!userSuppliedPat) {
+                    meta = get("/users/" + sanitized, null, false);
+                }
+            }
             if (meta == null || !meta.has("type")) {
                 return Collections.emptyList();
             }
             String type = textOrNull(meta.path("type"));
             final String listBase;
+            final String listQuery;
+            // Only a pasted PAT opts into private listing. Server GITHUB_TOKEN alone must not.
             if ("Organization".equalsIgnoreCase(type)) {
                 listBase = "/orgs/" + sanitized + "/repos";
-            } else {
-                String actor = tokenActorLogin(tokenOverride);
-                if (actor != null && actor.equalsIgnoreCase(sanitized)) {
-                    // /user/repos includes repositories the token can access (including collaborator repos).
-                    // We only want repositories owned by the requested account in bulk import.
-                    listBase = "/user/repos";
-                } else {
-                    listBase = "/users/" + sanitized + "/repos";
+                listQuery = userSuppliedPat
+                        ? "type=all&sort=full_name&direction=asc"
+                        : "type=public&sort=full_name&direction=asc";
+            } else if (userSuppliedPat) {
+                // /users/{login}/repos is public-only even with a PAT. Private user repos require
+                // /user/repos, and the PAT must belong to that same login.
+                String actor = requireTokenActorLogin(tokenOverride);
+                if (!actor.equalsIgnoreCase(sanitized)) {
+                    throw new RuntimeException(
+                            "GitHub token belongs to @" + actor + ", but import account is @" + sanitized
+                                    + ". Use a PAT for @" + sanitized + ", or leave the PAT empty to import public repos only.");
                 }
+                listBase = "/user/repos";
+                listQuery = "affiliation=owner&visibility=all&sort=full_name&direction=asc";
+            } else {
+                listBase = "/users/" + sanitized + "/repos";
+                listQuery = "type=owner&sort=full_name&direction=asc";
             }
-            List<GithubRepoRef> allVisible = paginateRepoList(listBase, tokenOverride);
+            List<GithubRepoRef> allVisible = paginateRepoList(listBase, listQuery, tokenOverride, userSuppliedPat);
             List<GithubRepoRef> ownedByAccount = new ArrayList<>();
             for (GithubRepoRef ref : allVisible) {
                 if (ref.owner() != null && ref.owner().equalsIgnoreCase(sanitized)) {
@@ -122,46 +176,62 @@ public class GithubMetadataClient {
                 }
             }
             return ownedByAccount;
+        } catch (RuntimeException ex) {
+            throw ex;
         } catch (Exception ex) {
             log.warn("GitHub listReposForAccount failed for {}: {}", login, ex.getMessage());
             return Collections.emptyList();
         }
     }
 
-    /** Login for the authenticated API user, or null if no token or /user failed. */
-    private String tokenActorLogin() {
-        return tokenActorLogin(null);
-    }
-
-    private String tokenActorLogin(String tokenOverride) {
-        if (effectiveBearer(tokenOverride, token) == null) {
-            return null;
+    /**
+     * Login for the authenticated API user. Throws when a token is present but {@code /user} fails
+     * (invalid PAT, missing profile read, etc.) so callers do not silently fall back to public-only lists.
+     */
+    private String requireTokenActorLogin(String tokenOverride) {
+        if (tokenOverride == null || tokenOverride.isBlank()) {
+            throw new RuntimeException("GitHub token is required to list private repositories");
         }
         try {
-            JsonNode n = get("/user", tokenOverride);
-            if (n == null) {
-                return null;
+            HttpResponse<String> res = rawGet("/user", tokenOverride, true);
+            if (res == null) {
+                throw new RuntimeException("Could not reach GitHub to validate the token");
             }
-            return textOrNull(n.path("login"));
+            int code = res.statusCode();
+            if (code == 401 || code == 403) {
+                throw new RuntimeException(
+                        "GitHub rejected the PAT (HTTP " + code + "). It may be invalid, expired, or missing required scopes (classic: repo; fine-grained: repository read).");
+            }
+            if (code / 100 != 2) {
+                throw new RuntimeException("GitHub could not validate the PAT (HTTP " + code + ")");
+            }
+            JsonNode n = mapper.readTree(res.body());
+            String actor = textOrNull(n.path("login"));
+            if (actor == null || actor.isBlank()) {
+                throw new RuntimeException("GitHub PAT did not return a user login");
+            }
+            return actor;
+        } catch (RuntimeException ex) {
+            throw ex;
         } catch (Exception ex) {
-            log.debug("GitHub tokenActorLogin failed: {}", ex.getMessage());
-            return null;
+            throw new RuntimeException("Failed to validate GitHub PAT: " + ex.getMessage(), ex);
         }
     }
 
-    private List<GithubRepoRef> paginateRepoList(String pathBase) {
-        return paginateRepoList(pathBase, null);
-    }
-
-    private List<GithubRepoRef> paginateRepoList(String pathBase, String tokenOverride) {
+    private List<GithubRepoRef> paginateRepoList(String pathBase, String query, String tokenOverride, boolean allowConfiguredFallback) {
         List<GithubRepoRef> out = new ArrayList<>();
         final int perPage = 100;
         final int maxPages = 50;
+        String q = (query == null || query.isBlank()) ? "sort=full_name&direction=asc" : query;
         for (int page = 1; page <= maxPages; page++) {
-            String path = pathBase + "?per_page=" + perPage + "&page=" + page + "&sort=full_name&direction=asc";
+            String path = pathBase + "?per_page=" + perPage + "&page=" + page + "&" + q;
             JsonNode arr;
             try {
-                arr = get(path, tokenOverride);
+                arr = get(path, tokenOverride, allowConfiguredFallback);
+                // Public listing: if a bad server token caused 401, retry with no auth.
+                if (arr == null && !allowConfiguredFallback) {
+                    arr = get(path, null, false);
+                }
             } catch (Exception ex) {
                 log.debug("GitHub repo page {} failed for {}: {}", page, pathBase, ex.getMessage());
                 break;
@@ -424,9 +494,14 @@ public class GithubMetadataClient {
     }
 
     /**
-     * @param tokenOverride if non-blank after trim, used as Bearer; otherwise the configured {@link #token}.
+     * @param tokenOverride if non-blank after trim, used as Bearer; otherwise the configured {@link #token}
+     *                      when {@code allowConfiguredFallback} is true.
      */
     private HttpResponse<String> rawGet(String path, String tokenOverride) throws Exception {
+        return rawGet(path, tokenOverride, true);
+    }
+
+    private HttpResponse<String> rawGet(String path, String tokenOverride, boolean allowConfiguredFallback) throws Exception {
         final URI uri;
         try {
             uri = URI.create(API_BASE + path);
@@ -440,7 +515,7 @@ public class GithubMetadataClient {
                 .header("Accept", "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", "2022-11-28")
                 .GET();
-        String bearer = effectiveBearer(tokenOverride, token);
+        String bearer = effectiveBearer(tokenOverride, token, allowConfiguredFallback);
         if (bearer != null) {
             b.header("Authorization", "Bearer " + bearer);
         }
@@ -448,11 +523,15 @@ public class GithubMetadataClient {
     }
 
     private JsonNode get(String path) throws Exception {
-        return get(path, null);
+        return get(path, null, true);
     }
 
     private JsonNode get(String path, String tokenOverride) throws Exception {
-        HttpResponse<String> res = rawGet(path, tokenOverride);
+        return get(path, tokenOverride, true);
+    }
+
+    private JsonNode get(String path, String tokenOverride, boolean allowConfiguredFallback) throws Exception {
+        HttpResponse<String> res = rawGet(path, tokenOverride, allowConfiguredFallback);
         if (res == null) return null;
         if (res.statusCode() / 100 != 2) return null;
         String body = res.body();
@@ -460,15 +539,17 @@ public class GithubMetadataClient {
         return mapper.readTree(body);
     }
 
-    /** Prefer trimmed {@code tokenOverride} when non-empty; else configured token. */
-    private static String effectiveBearer(String tokenOverride, String configuredToken) {
+    /**
+     * Prefer trimmed {@code tokenOverride} when non-empty; else configured token when allowed.
+     */
+    private static String effectiveBearer(String tokenOverride, String configuredToken, boolean allowConfiguredFallback) {
         if (tokenOverride != null) {
             String t = tokenOverride.trim();
             if (!t.isEmpty()) {
                 return t;
             }
         }
-        if (configuredToken != null && !configuredToken.isBlank()) {
+        if (allowConfiguredFallback && configuredToken != null && !configuredToken.isBlank()) {
             return configuredToken.trim();
         }
         return null;

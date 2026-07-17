@@ -1,17 +1,10 @@
 plugins {
     java
     id("org.springframework.boot")
-    id("io.spring.dependency-management")
 }
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
-}
-
-dependencyManagement {
-    imports {
-        mavenBom("org.springframework.cloud:spring-cloud-dependencies:2023.0.3")
-    }
 }
 
 dependencies {

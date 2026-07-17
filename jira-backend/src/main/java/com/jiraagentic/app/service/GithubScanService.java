@@ -20,7 +20,6 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.net.URI;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
@@ -31,8 +30,8 @@ import java.util.regex.Pattern;
 
 /**
  * Scans GitHub repositories connected to a space, looks for issue-key
- * references like "P1-12" in PR titles, PR bodies, and commit messages,
- * and auto-creates code links. Idempotent — re-running the scan never
+ * references like "P1-12" in PR titles and bodies, and auto-creates
+ * pull-request code links. Idempotent — re-running the scan never
  * creates duplicate links.
  */
 @Service
@@ -41,7 +40,6 @@ public class GithubScanService {
     private static final Logger log = LoggerFactory.getLogger(GithubScanService.class);
 
     private static final int PR_PAGE_SIZE = 50;
-    private static final int COMMIT_PAGE_SIZE = 50;
 
     private final SpaceGithubRepoRepository repoRepository;
     private final SpaceRepository spaceRepository;
@@ -87,20 +85,25 @@ public class GithubScanService {
 
         Space space = activeSpaceGuard.requireActive(spaceId);
 
-        repoRepository.findBySpaceIdAndOwnerAndRepo(spaceId, or.owner(), or.repo())
-                .ifPresent(existing -> { throw new RuntimeException("This repo is already connected"); });
-
-        // Best-effort existence check. We don't hard fail on a 404 since the
-        // user may have a valid private repo but no token configured.
-        if (!githubMetadataClient.repoExists(or.owner(), or.repo())) {
-            log.info("GitHub repo {}/{} not reachable via public API; adding anyway", or.owner(), or.repo());
+        Optional<SpaceGithubRepo> existing = repoRepository.findBySpaceIdAndOwnerAndRepo(spaceId, or.owner(), or.repo());
+        if (existing.isPresent()) {
+            throw new RuntimeException("This repo is already connected");
         }
 
+        return SpaceGithubRepoDto.from(connectRepo(space, or.owner(), or.repo()));
+    }
+
+    private SpaceGithubRepo connectRepo(Space space, String owner, String repoName) {
+        // Best-effort existence check. We don't hard fail on a 404 since the
+        // user may have a valid private repo but no token configured.
+        if (!githubMetadataClient.repoExists(owner, repoName)) {
+            log.info("GitHub repo {}/{} not reachable via public API; adding anyway", owner, repoName);
+        }
         SpaceGithubRepo repo = new SpaceGithubRepo();
         repo.setSpace(space);
-        repo.setOwner(or.owner());
-        repo.setRepo(or.repo());
-        return SpaceGithubRepoDto.from(repoRepository.save(repo));
+        repo.setOwner(owner);
+        repo.setRepo(repoName);
+        return repoRepository.save(repo);
     }
 
     /**
@@ -121,14 +124,19 @@ public class GithubScanService {
             throw new RuntimeException("Space not found: " + spaceId);
         }
 
-        String importToken = req.getGithubToken();
+        String importToken = trimToNull(req.getGithubToken());
+
+        // Validate PAT first so a bad token is never reported as “account not found”.
+        if (importToken != null) {
+            githubMetadataClient.requireValidTokenActor(importToken);
+        }
 
         if (!githubMetadataClient.accountExists(account, importToken)) {
             throw new RuntimeException("GitHub user or organization not found: " + account);
         }
 
         List<GithubMetadataClient.GithubRepoRef> discovered = githubMetadataClient.listReposForAccount(account, importToken);
-        final String patToStore = trimToNull(importToken);
+        final String patToStore = importToken;
 
         return transactionTemplate.execute(status -> {
             Space space = activeSpaceGuard.requireActive(spaceId);
@@ -165,6 +173,8 @@ public class GithubScanService {
         if (!Objects.equals(repo.getSpace().getId(), spaceId)) {
             throw new RuntimeException("Repo connection does not belong to this space");
         }
+        // Disconnecting a watched repo also clears Development links for that owner/repo
+        // across issues in this space (Scan will no longer watch it).
         codeLinkService.removeLinksForGithubRepoInSpace(spaceId, repo.getOwner(), repo.getRepo(), actorUserId);
         repoRepository.delete(repo);
     }
@@ -181,6 +191,8 @@ public class GithubScanService {
             String owner,
             String repo,
             int prsInspected,
+            int openPrs,
+            int closedPrs,
             int commitsInspected,
             int linksCreated,
             String warning
@@ -190,6 +202,8 @@ public class GithubScanService {
             int reposScanned,
             int reposRemoved,
             int prsInspected,
+            int openPrs,
+            int closedPrs,
             int commitsInspected,
             int linksCreated,
             List<RepoScanStats> perRepo,
@@ -215,6 +229,8 @@ public class GithubScanService {
 
         List<SpaceGithubRepo> repos = repoRepository.findBySpaceIdOrderByCreatedAtAsc(spaceId);
         int prsInspected = 0;
+        int openPrsTotal = 0;
+        int closedPrsTotal = 0;
         int commitsInspected = 0;
         int linksCreated = 0;
         int reposRemoved = 0;
@@ -227,20 +243,20 @@ public class GithubScanService {
 
         for (SpaceGithubRepo repo : repos) {
             reposScanned++;
-            int[] prForThisRepo = {0};
-            int[] commitsForThisRepo = {0};
+            int openForThisRepo = 0;
+            int closedForThisRepo = 0;
             int[] linksForThisRepo = {0};
-            // Avoid double-counting a commit that is both on a PR head-branch
-            // AND on the default branch (which happens after PR merge). Keyed
-            // on the commit's html_url because SHAs are unique per repo.
-            Set<String> seenCommitUrls = new HashSet<>();
             String repoWarning = null;
             try {
-                // ── Step 1: Pull requests (title + body) ────────────────
+                // Pull requests only — commit messages are noisy and duplicate PR links.
                 List<GithubMetadataClient.PullSummary> pulls =
                         githubMetadataClient.listRecentPulls(repo.getOwner(), repo.getRepo(), PR_PAGE_SIZE, tokenForGithub);
-                prForThisRepo[0] = pulls.size();
                 for (var pr : pulls) {
+                    if (isOpenPull(pr)) {
+                        openForThisRepo++;
+                    } else {
+                        closedForThisRepo++;
+                    }
                     String blob = (pr.title() == null ? "" : pr.title()) + "\n" + (pr.body() == null ? "" : pr.body());
                     Set<String> keys = extractKeys(blob, issueKeyPattern, spaceKey);
                     for (String key : keys) {
@@ -252,39 +268,6 @@ public class GithubScanService {
                                 .isPresent();
                         if (created) linksForThisRepo[0]++;
                     }
-
-                    // ── Step 2: Commits living on this PR's branch ──────
-                    //
-                    // Key reason for calling /pulls/{n}/commits in addition to
-                    // /repos/{o}/{r}/commits: GitHub's default-branch listing
-                    // *does not* surface commits that only exist on a PR head
-                    // branch (i.e. unmerged PRs). That single fact means the
-                    // scanner was effectively blind until merge — which is the
-                    // opposite of what a real team wants. We want to see the
-                    // ticket ↔ commit relationship the moment a dev pushes.
-                    List<GithubMetadataClient.CommitSummary> prCommits =
-                            githubMetadataClient.listPullCommits(repo.getOwner(), repo.getRepo(), pr.number(), COMMIT_PAGE_SIZE, tokenForGithub);
-                    for (var c : prCommits) {
-                        if (c.htmlUrl() == null) continue;
-                        if (!seenCommitUrls.add(c.htmlUrl())) continue;
-                        commitsForThisRepo[0]++;
-                        scanCommit(c, issueKeyPattern, spaceKey, actorUserId, linksForThisRepo);
-                    }
-                }
-
-                // ── Step 3: Default-branch commits ─────────────────────
-                //
-                // Still needed for commits that went in without a PR
-                // (e.g. admin pushes to main directly). We dedup against
-                // PR commits already seen in Step 2, so merging a PR
-                // doesn't inflate the commit count on the next scan.
-                List<GithubMetadataClient.CommitSummary> commits =
-                        githubMetadataClient.listRecentCommits(repo.getOwner(), repo.getRepo(), COMMIT_PAGE_SIZE, tokenForGithub);
-                for (var c : commits) {
-                    if (c.htmlUrl() == null) continue;
-                    if (!seenCommitUrls.add(c.htmlUrl())) continue;
-                    commitsForThisRepo[0]++;
-                    scanCommit(c, issueKeyPattern, spaceKey, actorUserId, linksForThisRepo);
                 }
 
                 repo.setLastScannedAt(Instant.now());
@@ -294,35 +277,27 @@ public class GithubScanService {
                 repoWarning = ex.getMessage() == null ? "unknown error" : ex.getMessage();
                 warnings.add(repo.getOwner() + "/" + repo.getRepo() + ": " + repoWarning);
             }
-            prsInspected += prForThisRepo[0];
-            commitsInspected += commitsForThisRepo[0];
+            int prForThisRepo = openForThisRepo + closedForThisRepo;
+            prsInspected += prForThisRepo;
+            openPrsTotal += openForThisRepo;
+            closedPrsTotal += closedForThisRepo;
             linksCreated += linksForThisRepo[0];
+            // commitsInspected kept in the DTO for API compatibility; always 0 now.
             perRepo.add(new RepoScanStats(
                     repo.getId(), repo.getOwner(), repo.getRepo(),
-                    prForThisRepo[0], commitsForThisRepo[0], linksForThisRepo[0], repoWarning));
+                    prForThisRepo, openForThisRepo, closedForThisRepo, 0, linksForThisRepo[0], repoWarning));
         }
-        return new ScanResult(reposScanned, reposRemoved, prsInspected, commitsInspected, linksCreated, perRepo, warnings);
+        return new ScanResult(
+                reposScanned, reposRemoved, prsInspected, openPrsTotal, closedPrsTotal,
+                commitsInspected, linksCreated, perRepo, warnings);
     }
 
-    /**
-     * Runs key extraction + link-if-missing on a single commit and bumps
-     * the per-repo link counter. Extracted to keep {@link #scanSpace} flat.
-     */
-    private void scanCommit(GithubMetadataClient.CommitSummary c,
-                             Pattern issueKeyPattern,
-                             String spaceKey,
-                             Long actorUserId,
-                             int[] linkCounter) {
-        String msg = c.message() == null ? "" : c.message();
-        Set<String> keys = extractKeys(msg, issueKeyPattern, spaceKey);
-        for (String key : keys) {
-            Optional<Issue> issue = issueRepository.findByIssueKey(key);
-            if (issue.isEmpty()) continue;
-            boolean created = codeLinkService
-                    .linkIfMissing(issue.get(), c.htmlUrl(), actorUserId)
-                    .isPresent();
-            if (created) linkCounter[0]++;
-        }
+    /** Open / draft count as open; merged / closed (and anything else) as closed. */
+    private static boolean isOpenPull(GithubMetadataClient.PullSummary pr) {
+        if (pr.merged()) return false;
+        if (pr.draft()) return true;
+        String state = pr.state() == null ? "" : pr.state().toLowerCase();
+        return "open".equals(state) || "draft".equals(state);
     }
 
     private static String trimToNull(String s) {
