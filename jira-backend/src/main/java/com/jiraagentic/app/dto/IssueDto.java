@@ -1,10 +1,12 @@
 package com.jiraagentic.app.dto;
 
 import com.jiraagentic.app.entity.Issue;
+import com.jiraagentic.app.entity.Label;
 import lombok.Data;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.stream.Collectors;
 
 @Data
 public class IssueDto {
@@ -69,7 +71,10 @@ public class IssueDto {
         dto.setStartDate(i.getStartDate());
         dto.setDueDate(i.getDueDate());
         dto.setIssueOrder(i.getIssueOrder());
-        dto.setLabels(i.getLabels());
+        dto.setLabels(i.getLabels().stream()
+                .filter(label -> label.getDeletedAt() == null)
+                .map(Label::getName)
+                .collect(Collectors.toList()));
         dto.setCreatedAt(i.getCreatedAt());
         dto.setUpdatedAt(i.getUpdatedAt());
         return dto;

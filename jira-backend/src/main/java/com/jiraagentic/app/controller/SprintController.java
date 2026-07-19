@@ -24,8 +24,8 @@ public class SprintController {
     }
 
     @GetMapping("/{id}")
-    public SprintDto getById(@PathVariable Long id) {
-        return sprintService.findById(id);
+    public SprintDto getById(@PathVariable Long spaceId, @PathVariable Long id) {
+        return sprintService.findById(spaceId, id);
     }
 
     @PostMapping
@@ -34,13 +34,19 @@ public class SprintController {
     }
 
     @PutMapping("/{id}")
-    public SprintDto update(@PathVariable Long id, @RequestBody CreateSprintRequest req) {
-        return sprintService.update(id, req);
+    public SprintDto update(
+            @PathVariable Long spaceId,
+            @PathVariable Long id,
+            @RequestBody CreateSprintRequest req) {
+        return sprintService.update(spaceId, id, req);
     }
 
     @PostMapping("/{id}/complete")
-    public SprintDto complete(@PathVariable Long id, @RequestBody(required = false) CompleteSprintRequest req) {
-        return sprintService.complete(id, req != null ? req : new CompleteSprintRequest());
+    public SprintDto complete(
+            @PathVariable Long spaceId,
+            @PathVariable Long id,
+            @RequestBody(required = false) CompleteSprintRequest req) {
+        return sprintService.complete(spaceId, id, req != null ? req : new CompleteSprintRequest());
     }
 
     @PostMapping("/{id}/reorder")
@@ -52,8 +58,8 @@ public class SprintController {
     }
 
     @DeleteMapping("/{id}")
-    public ResponseEntity<Void> delete(@PathVariable Long id) {
-        sprintService.delete(id);
+    public ResponseEntity<Void> delete(@PathVariable Long spaceId, @PathVariable Long id) {
+        sprintService.delete(spaceId, id);
         return ResponseEntity.noContent().build();
     }
 }

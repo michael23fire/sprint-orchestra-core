@@ -8,6 +8,8 @@ import com.jiraagentic.app.entity.Issue;
 import com.jiraagentic.app.entity.Space;
 import com.jiraagentic.app.entity.Sprint;
 import com.jiraagentic.app.repository.IssueRepository;
+import com.jiraagentic.app.repository.SpaceRepository;
+import com.jiraagentic.app.repository.SprintIssueHistoryRepository;
 import com.jiraagentic.app.repository.SprintRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -26,7 +28,10 @@ public class SprintService {
 
     private final SprintRepository sprintRepository;
     private final IssueRepository issueRepository;
+    private final SpaceRepository spaceRepository;
     private final ActiveSpaceGuard activeSpaceGuard;
+    private final SprintHistoryService sprintHistoryService;
+    private final SprintIssueHistoryRepository sprintIssueHistoryRepository;
 
     /**
      * Jira backlog order: completed (closed) first → active → future (by sprint_order).
@@ -62,16 +67,16 @@ public class SprintService {
         return ordered.stream().map(SprintDto::from).collect(Collectors.toList());
     }
 
-    public SprintDto findById(Long id) {
+    public SprintDto findById(Long spaceId, Long id) {
         Sprint sprint = sprintRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Sprint not found: " + id));
-        activeSpaceGuard.requireActive(sprint.getSpace());
+        assertSprintInSpace(sprint, spaceId);
         return SprintDto.from(sprint);
     }
 
     @Transactional
     public SprintDto create(Long spaceId, CreateSprintRequest req) {
-        Space space = activeSpaceGuard.requireActive(spaceId);
+        Space space = lockActiveSpace(spaceId);
 
         Sprint sprint = new Sprint();
         sprint.setSpace(space);
@@ -79,7 +84,11 @@ public class SprintService {
         sprint.setGoal(req.getGoal());
         sprint.setStartDate(req.getStartDate());
         sprint.setEndDate(req.getEndDate());
-        sprint.setStatus(req.getStatus() != null ? req.getStatus() : "future");
+        String requestedStatus = req.getStatus() != null ? req.getStatus() : "future";
+        if (!"future".equals(requestedStatus) && !"active".equals(requestedStatus)) {
+            throw new IllegalArgumentException("A sprint must be created as future or active");
+        }
+        sprint.setStatus(requestedStatus);
         sprint.setSprintOrder(nextSprintOrder(spaceId, sprint.getStatus()));
 
         assertDatesValid(sprint.getStartDate(), sprint.getEndDate());
@@ -88,15 +97,39 @@ public class SprintService {
             assertSingleActive(spaceId, null);
         }
 
-        return SprintDto.from(sprintRepository.save(sprint));
+        Sprint saved = sprintRepository.save(sprint);
+        if ("active".equals(saved.getStatus())) {
+            List<Issue> issues = issueRepository.findBySprint_Id(saved.getId());
+            sprintHistoryService.assertSprintReady(issues);
+            sprintHistoryService.snapshotInitialScope(saved, issues);
+        }
+        return SprintDto.from(saved);
     }
 
     @Transactional
-    public SprintDto update(Long id, CreateSprintRequest req) {
+    public SprintDto update(Long spaceId, Long id, CreateSprintRequest req) {
+        lockActiveSpace(spaceId);
         Sprint sprint = sprintRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Sprint not found: " + id));
         Space space = sprint.getSpace();
-        activeSpaceGuard.requireActive(space);
+        String oldStatus = sprint.getStatus();
+        assertSprintInSpace(sprint, spaceId);
+        if (req.getStatus() != null) {
+            if (!"future".equals(req.getStatus())
+                    && !"active".equals(req.getStatus())
+                    && !"completed".equals(req.getStatus())) {
+                throw new IllegalArgumentException("Invalid sprint status: " + req.getStatus());
+            }
+            if ("completed".equals(req.getStatus()) && !"completed".equals(oldStatus)) {
+                throw new IllegalArgumentException("Use the complete sprint action to close a sprint");
+            }
+            if ("completed".equals(oldStatus) && !"completed".equals(req.getStatus())) {
+                throw new IllegalArgumentException("A completed sprint cannot be reopened");
+            }
+            if ("active".equals(oldStatus) && "future".equals(req.getStatus())) {
+                throw new IllegalArgumentException("An active sprint cannot be moved back to future");
+            }
+        }
         if (req.getName() != null) sprint.setName(req.getName());
         if (req.getGoal() != null) sprint.setGoal(req.getGoal());
         if (req.getStartDate() != null) sprint.setStartDate(req.getStartDate());
@@ -109,7 +142,12 @@ public class SprintService {
             assertSingleActive(space.getId(), sprint.getId());
         }
 
-        return SprintDto.from(sprintRepository.save(sprint));
+        boolean starting = !"active".equals(oldStatus) && "active".equals(sprint.getStatus());
+        List<Issue> issues = starting ? issueRepository.findBySprint_Id(sprint.getId()) : List.of();
+        if (starting) sprintHistoryService.assertSprintReady(issues);
+        Sprint saved = sprintRepository.save(sprint);
+        if (starting) sprintHistoryService.snapshotInitialScope(saved, issues);
+        return SprintDto.from(saved);
     }
 
     /**
@@ -118,7 +156,7 @@ public class SprintService {
      */
     @Transactional
     public List<SprintDto> reorder(Long spaceId, Long sprintId, ReorderSprintRequest req) {
-        activeSpaceGuard.requireActive(spaceId);
+        lockActiveSpace(spaceId);
         if (req == null || req.getAction() == null || req.getAction().isBlank()) {
             throw new IllegalArgumentException("action is required");
         }
@@ -208,17 +246,20 @@ public class SprintService {
      * newly created future sprint).
      */
     @Transactional
-    public SprintDto complete(Long id, CompleteSprintRequest req) {
+    public SprintDto complete(Long spaceId, Long id, CompleteSprintRequest req) {
+        lockActiveSpace(spaceId);
         Sprint sprint = sprintRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Sprint not found: " + id));
         Space space = sprint.getSpace();
-        activeSpaceGuard.requireActive(space);
+        assertSprintInSpace(sprint, spaceId);
 
         if (!"active".equals(sprint.getStatus())) {
             throw new IllegalArgumentException("Only an active sprint can be completed: " + id);
         }
 
         List<Issue> issuesInSprint = issueRepository.findBySprint_Id(id);
+        sprintHistoryService.assertSprintReady(issuesInSprint);
+        sprintHistoryService.finalizeSprint(sprint, issuesInSprint);
         List<Issue> incompleteIssues = issuesInSprint.stream()
                 .filter(issue -> !"done".equals(issue.getStatus()))
                 .collect(Collectors.toList());
@@ -288,10 +329,11 @@ public class SprintService {
     }
 
     @Transactional
-    public void delete(Long id) {
+    public void delete(Long spaceId, Long id) {
+        lockActiveSpace(spaceId);
         Sprint sprint = sprintRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Sprint not found: " + id));
-        activeSpaceGuard.requireActive(sprint.getSpace());
+        assertSprintInSpace(sprint, spaceId);
 
         // Jira Cloud allows deleting a sprint from any state (planned/active/completed).
         // Issues on the deleted sprint move to the next future sprint, or back to the backlog.
@@ -305,11 +347,27 @@ public class SprintService {
         List<Issue> issuesOnSprint = issueRepository.findBySprint_Id(id);
         if (!issuesOnSprint.isEmpty()) {
             for (Issue issue : issuesOnSprint) {
+                if (nextSprint != null) {
+                    SprintHistoryService.assertEstimatedForSprint(issue);
+                }
                 issue.setSprint(nextSprint);
             }
             issueRepository.saveAll(issuesOnSprint);
         }
 
+        sprintIssueHistoryRepository.deleteBySprint_Id(id);
         sprintRepository.deleteById(id);
+    }
+
+    private void assertSprintInSpace(Sprint sprint, Long spaceId) {
+        activeSpaceGuard.requireActive(sprint.getSpace());
+        if (!sprint.getSpace().getId().equals(spaceId)) {
+            throw new IllegalArgumentException("Sprint does not belong to space: " + spaceId);
+        }
+    }
+
+    private Space lockActiveSpace(Long spaceId) {
+        return spaceRepository.findActiveByIdForUpdate(spaceId)
+                .orElseThrow(() -> new IllegalArgumentException("Space not found or deleted: " + spaceId));
     }
 }

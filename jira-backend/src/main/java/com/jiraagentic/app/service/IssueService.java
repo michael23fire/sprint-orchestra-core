@@ -5,6 +5,7 @@ import com.jiraagentic.app.dto.CreateIssueRequest;
 import com.jiraagentic.app.dto.IssueDto;
 import com.jiraagentic.app.dto.UpdateIssueRequest;
 import com.jiraagentic.app.entity.Issue;
+import com.jiraagentic.app.entity.Label;
 import com.jiraagentic.app.entity.Space;
 import com.jiraagentic.app.entity.Sprint;
 import com.jiraagentic.app.repository.*;
@@ -15,10 +16,8 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.stream.Collectors;
 
 @Service
@@ -38,6 +37,8 @@ public class IssueService {
     private final IssueCodeLinkRepository issueCodeLinkRepository;
     private final IssueHistoryRepository issueHistoryRepository;
     private final ActiveSpaceGuard activeSpaceGuard;
+    private final LabelService labelService;
+    private final SprintHistoryService sprintHistoryService;
 
     public List<IssueDto> findBySpace(Long spaceId) {
         activeSpaceGuard.requireActive(spaceId);
@@ -52,10 +53,10 @@ public class IssueService {
                 .collect(Collectors.toList());
     }
 
-    public IssueDto findByKey(String issueKey) {
+    public IssueDto findByKey(Long spaceId, String issueKey) {
         Issue issue = issueRepository.findByIssueKey(issueKey)
                 .orElseThrow(() -> new RuntimeException("Issue not found: " + issueKey));
-        activeSpaceGuard.requireActive(issue.getSpace());
+        assertIssueInSpace(issue, spaceId);
         return toDto(issue);
     }
 
@@ -74,7 +75,7 @@ public class IssueService {
         issue.setDescription(req.getDescription());
         issue.setIssueType(req.getIssueType() != null ? req.getIssueType() : "task");
         if (req.getParentId() != null) {
-            Issue parent = issueRepository.findById(req.getParentId()).orElse(null);
+            Issue parent = resolveParent(spaceId, req.getParentId());
             issue.setParent(parent);
             if (req.getStatus() != null) {
                 issue.setStatus(req.getStatus());
@@ -90,7 +91,7 @@ public class IssueService {
         issue.setStoryPoints(req.getStoryPoints());
         issue.setStartDate(req.getStartDate());
         issue.setDueDate(req.getDueDate());
-        issue.setLabels(new ArrayList<>(sanitizeLabels(req.getLabels())));
+        issue.setLabels(labelService.resolveLabels(spaceId, req.getLabels()));
 
         Long reporterId = req.getReporterId() != null ? req.getReporterId() : creatorUserId;
         if (reporterId != null) {
@@ -101,22 +102,24 @@ public class IssueService {
             issue.setAssignee(userRepository.findById(req.getAssigneeId()).orElse(null));
         }
         if (req.getSprintId() != null && !isEpicType(issue.getIssueType())) {
-            issue.setSprint(sprintRepository.findById(req.getSprintId()).orElse(null));
+            issue.setSprint(resolveSprint(spaceId, req.getSprintId()));
         }
 
         applyEpicInvariants(issue);
         assertValidSubtaskParent(issue);
+        if (issue.getSprint() != null) SprintHistoryService.assertEstimatedForSprint(issue);
 
         Issue saved = issueRepository.save(issue);
+        sprintHistoryService.trackAdded(saved.getSprint(), saved);
         issueHistoryService.recordEvent(saved, creatorUserId, "issue_created", "Issue created");
         return toDto(saved);
     }
 
     @Transactional
-    public IssueDto update(String issueKey, UpdateIssueRequest req, Long actorUserId) {
+    public IssueDto update(Long spaceId, String issueKey, UpdateIssueRequest req, Long actorUserId) {
         Issue issue = issueRepository.findByIssueKey(issueKey)
                 .orElseThrow(() -> new RuntimeException("Issue not found: " + issueKey));
-        activeSpaceGuard.requireActive(issue.getSpace());
+        assertIssueInSpace(issue, spaceId);
 
         String oldTitle = issue.getTitle();
         String oldDescription = issue.getDescription();
@@ -125,12 +128,13 @@ public class IssueService {
         String oldPriority = issue.getPriority();
         String oldAssignee = issue.getAssignee() != null ? issue.getAssignee().getName() : null;
         String oldReporter = issue.getReporter() != null ? issue.getReporter().getName() : null;
+        Sprint oldSprintEntity = issue.getSprint();
         String oldSprint = issue.getSprint() != null ? issue.getSprint().getName() : null;
         String oldParent = issue.getParent() != null ? issue.getParent().getIssueKey() : null;
         Integer oldStoryPoints = issue.getStoryPoints();
         String oldStartDate = issue.getStartDate() != null ? issue.getStartDate().toString() : null;
         String oldDueDate = issue.getDueDate() != null ? issue.getDueDate().toString() : null;
-        String oldLabels = issue.getLabels() != null ? String.join(", ", issue.getLabels()) : null;
+        String oldLabels = labelNames(issue);
         Integer oldIssueOrder = issue.getIssueOrder();
 
         if (req.getTitle() != null) issue.setTitle(req.getTitle());
@@ -155,11 +159,8 @@ public class IssueService {
         if (req.getDueDate() != null) issue.setDueDate(req.getDueDate());
         if (req.getIssueOrder() != null) issue.setIssueOrder(req.getIssueOrder());
         if (req.getLabels() != null) {
-            // Hibernate owns this @ElementCollection. Mutate its managed bag
-            // instead of replacing it with an immutable List.of(), which
-            // throws UnsupportedOperationException during dirty checking.
             issue.getLabels().clear();
-            issue.getLabels().addAll(sanitizeLabels(req.getLabels()));
+            issue.getLabels().addAll(labelService.resolveLabels(issue.getSpace().getId(), req.getLabels()));
         }
 
         if (Boolean.TRUE.equals(req.getClearAssignee())) {
@@ -175,16 +176,21 @@ public class IssueService {
         if (Boolean.TRUE.equals(req.getClearSprint())) {
             issue.setSprint(null);
         } else if (req.getSprintId() != null) {
-            issue.setSprint(sprintRepository.findById(req.getSprintId()).orElse(null));
+            issue.setSprint(resolveSprint(issue.getSpace().getId(), req.getSprintId()));
         }
         if (Boolean.TRUE.equals(req.getClearParent())) {
             issue.setParent(null);
         } else if (req.getParentId() != null) {
-            issue.setParent(issueRepository.findById(req.getParentId()).orElse(null));
+            issue.setParent(resolveParent(issue.getSpace().getId(), req.getParentId()));
         }
 
         applyEpicInvariants(issue);
         assertValidSubtaskParent(issue);
+        boolean newlyAssignedToSprint = !sameSprint(oldSprintEntity, issue.getSprint()) && issue.getSprint() != null;
+        boolean becameEstimatableInSprint = req.getIssueType() != null && issue.getSprint() != null;
+        if (newlyAssignedToSprint || becameEstimatableInSprint) {
+            SprintHistoryService.assertEstimatedForSprint(issue);
+        }
 
         issueHistoryService.recordFieldChange(issue, actorUserId, "title", oldTitle, issue.getTitle());
         issueHistoryService.recordFieldChange(issue, actorUserId, "description", oldDescription, issue.getDescription());
@@ -198,10 +204,14 @@ public class IssueService {
         issueHistoryService.recordFieldChange(issue, actorUserId, "storyPoints", oldStoryPoints, issue.getStoryPoints());
         issueHistoryService.recordFieldChange(issue, actorUserId, "startDate", oldStartDate, issue.getStartDate() != null ? issue.getStartDate().toString() : null);
         issueHistoryService.recordFieldChange(issue, actorUserId, "dueDate", oldDueDate, issue.getDueDate() != null ? issue.getDueDate().toString() : null);
-        issueHistoryService.recordFieldChange(issue, actorUserId, "labels", oldLabels, issue.getLabels() != null ? String.join(", ", issue.getLabels()) : null);
+        issueHistoryService.recordFieldChange(issue, actorUserId, "labels", oldLabels, labelNames(issue));
         issueHistoryService.recordFieldChange(issue, actorUserId, "issueOrder", oldIssueOrder, issue.getIssueOrder());
 
         Issue saved = issueRepository.save(issue);
+        if (!sameSprint(oldSprintEntity, saved.getSprint())) {
+            sprintHistoryService.trackRemoved(oldSprintEntity, saved);
+            sprintHistoryService.trackAdded(saved.getSprint(), saved);
+        }
         if (req.getDescription() != null && !Objects.equals(oldDescription, saved.getDescription())) {
             issueAttachmentService.reconcileEmbeddedAttachments(saved.getId(), actorUserId);
         }
@@ -217,8 +227,13 @@ public class IssueService {
             if (!isSubtaskType(child.getIssueType())) {
                 continue;
             }
+            Sprint oldSprint = child.getSprint();
             child.setSprint(sprintOrNull);
             issueRepository.save(child);
+            if (!sameSprint(oldSprint, sprintOrNull)) {
+                sprintHistoryService.trackRemoved(oldSprint, child);
+                sprintHistoryService.trackAdded(sprintOrNull, child);
+            }
             cascadeSprintToChildren(child.getId(), sprintOrNull);
         }
     }
@@ -231,19 +246,35 @@ public class IssueService {
         return issueType != null && "subtask".equalsIgnoreCase(issueType);
     }
 
-    /** Work types are first-class fields; do not persist duplicate type-like labels. */
-    private static List<String> sanitizeLabels(List<String> labels) {
-        if (labels == null || labels.isEmpty()) {
-            return new ArrayList<>();
+    private Sprint resolveSprint(Long spaceId, Long sprintId) {
+        Sprint sprint = sprintRepository.findById(sprintId)
+                .orElseThrow(() -> new IllegalArgumentException("Sprint not found: " + sprintId));
+        if (!sprint.getSpace().getId().equals(spaceId)) {
+            throw new IllegalArgumentException("Sprint does not belong to space: " + spaceId);
         }
-        Set<String> reserved = Set.of("bug", "story", "epic");
-        return labels.stream()
-                .filter(Objects::nonNull)
-                .map(String::trim)
-                .filter(label -> !label.isEmpty())
-                .filter(label -> !reserved.contains(label.toLowerCase(Locale.ROOT)))
-                .distinct()
-                .collect(Collectors.toCollection(ArrayList::new));
+        if ("completed".equals(sprint.getStatus())) {
+            throw new IllegalArgumentException("Issues cannot be added to a completed sprint");
+        }
+        return sprint;
+    }
+
+    private Issue resolveParent(Long spaceId, Long parentId) {
+        Issue parent = issueRepository.findById(parentId)
+                .orElseThrow(() -> new IllegalArgumentException("Parent issue not found: " + parentId));
+        if (!parent.getSpace().getId().equals(spaceId)) {
+            throw new IllegalArgumentException("Parent issue does not belong to space: " + spaceId);
+        }
+        return parent;
+    }
+
+    private static boolean sameSprint(Sprint left, Sprint right) {
+        if (left == null || right == null) return left == right;
+        return Objects.equals(left.getId(), right.getId());
+    }
+
+    private static String labelNames(Issue issue) {
+        if (issue.getLabels() == null || issue.getLabels().isEmpty()) return "";
+        return issue.getLabels().stream().map(Label::getName).collect(Collectors.joining(", "));
     }
 
     /**
@@ -255,12 +286,16 @@ public class IssueService {
         }
         issue.setParent(null);
         issue.setSprint(null);
+        issue.setStoryPoints(null);
     }
 
     private void assertValidSubtaskParent(Issue issue) {
         if (!isSubtaskType(issue.getIssueType())) {
             return;
         }
+        // Parent work owns the estimate; pointing both parent and subtask would
+        // double-count sprint commitment and velocity.
+        issue.setStoryPoints(null);
         if (issue.getParent() == null) {
             throw new IllegalArgumentException(
                     "A subtask must have a parent issue; use Create child issue on the parent.");
@@ -272,10 +307,10 @@ public class IssueService {
     }
 
     @Transactional
-    public void delete(String issueKey, Long actorUserId) {
+    public void delete(Long spaceId, String issueKey, Long actorUserId) {
         Issue issue = issueRepository.findByIssueKey(issueKey)
                 .orElseThrow(() -> new RuntimeException("Issue not found: " + issueKey));
-        activeSpaceGuard.requireActive(issue.getSpace());
+        assertIssueInSpace(issue, spaceId);
         List<Long> postOrder = new ArrayList<>();
         collectSubtreePostOrder(issue.getId(), postOrder);
         for (Long issueId : postOrder) {
@@ -311,6 +346,13 @@ public class IssueService {
                         i -> i.getParent().getId(),
                         LinkedHashMap::new,
                         Collectors.mapping(Issue::getIssueKey, Collectors.toList())));
+    }
+
+    private void assertIssueInSpace(Issue issue, Long spaceId) {
+        activeSpaceGuard.requireActive(issue.getSpace());
+        if (!issue.getSpace().getId().equals(spaceId)) {
+            throw new IllegalArgumentException("Issue does not belong to space: " + spaceId);
+        }
     }
 
     /** Board/list: core issue row + subtask keys only; comments/links/attachments loaded via {@link #findByKey}. */

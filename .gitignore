@@ -69,3 +69,6 @@ storage/
 Thumbs.db
 *.swp
 *~
+
+# Generated seed data (reproducible via scripts/seed/generate_seed.py)
+scripts/seed/*.sql

@@ -23,5 +23,7 @@ public interface IssueRepository extends JpaRepository<Issue, Long> {
 
     List<Issue> findBySprint_Id(Long sprintId);
 
+    List<Issue> findDistinctByLabels_Id(Long labelId);
+
     boolean existsByIssueKey(String issueKey);
 }

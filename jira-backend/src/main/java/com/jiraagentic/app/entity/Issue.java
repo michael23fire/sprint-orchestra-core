@@ -7,8 +7,8 @@ import lombok.AllArgsConstructor;
 import java.io.Serializable;
 import java.time.Instant;
 import java.time.LocalDate;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 @Entity
 @Table(name = "issues", indexes = {
@@ -76,10 +76,13 @@ public class Issue implements Serializable {
     @Column(name = "issue_order")
     private Integer issueOrder = 0;
 
-    @ElementCollection
-    @CollectionTable(name = "issue_labels", joinColumns = @JoinColumn(name = "issue_id"))
-    @Column(name = "label", length = 50)
-    private List<String> labels = new ArrayList<>();
+    @ManyToMany
+    @JoinTable(
+            name = "issue_labels",
+            joinColumns = @JoinColumn(name = "issue_id"),
+            inverseJoinColumns = @JoinColumn(name = "label_id"))
+    @OrderBy("name ASC")
+    private Set<Label> labels = new LinkedHashSet<>();
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;

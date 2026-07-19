@@ -42,6 +42,30 @@ public class Sprint implements Serializable {
     @Column(name = "sprint_order", nullable = false)
     private Integer sprintOrder = 0;
 
+    @Column(name = "initial_committed_points")
+    private Integer initialCommittedPoints;
+
+    @Column(name = "initial_completed_points")
+    private Integer initialCompletedPoints;
+
+    @Column(name = "final_scope_points")
+    private Integer finalScopePoints;
+
+    @Column(name = "completed_points")
+    private Integer completedPoints;
+
+    @Column(name = "initial_issue_count")
+    private Integer initialIssueCount;
+
+    @Column(name = "completed_issue_count")
+    private Integer completedIssueCount;
+
+    @Column(name = "final_issue_count")
+    private Integer finalIssueCount;
+
+    @Column(name = "unestimated_issue_count")
+    private Integer unestimatedIssueCount;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
