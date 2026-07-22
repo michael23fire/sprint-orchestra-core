@@ -70,5 +70,6 @@ Thumbs.db
 *.swp
 *~
 
-# Generated seed data (reproducible via scripts/seed/generate_seed.py)
-scripts/seed/*.sql
+# Synthetic data generators & artifacts (local; not part of FE/BE publish)
+codex/
+scripts/seed/

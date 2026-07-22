@@ -18,6 +18,9 @@ public interface SpaceMemberRepository extends JpaRepository<SpaceMember, Long> 
 
     List<SpaceMember> findByUserId(Long userId);
 
+    @Query("SELECT sm.space.id FROM SpaceMember sm WHERE sm.user.id = :userId AND sm.space.deletedAt IS NULL")
+    List<Long> findActiveSpaceIdsByUserId(@Param("userId") Long userId);
+
     Optional<SpaceMember> findBySpaceIdAndUserId(Long spaceId, Long userId);
 
     boolean existsBySpaceIdAndUserId(Long spaceId, Long userId);

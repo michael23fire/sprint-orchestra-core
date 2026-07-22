@@ -1,4 +1,4 @@
-# Jira-like Core Database Schema (Final, Current Project)
+# Jira-like Core Database Schema (Current Project)
 
 ---
 
@@ -14,7 +14,9 @@
   - [Table: space_groups](#table-space_groups)
   - [Table: sprints](#table-sprints)
   - [Table: issues](#table-issues)
+  - [Table: labels](#table-labels)
   - [Table: issue_labels](#table-issue_labels)
+  - [Table: sprint_issue_history](#table-sprint_issue_history)
   - [Table: comments](#table-comments)
   - [Table: issue_history](#table-issue_history)
   - [Table: issue_links](#table-issue_links)
@@ -30,10 +32,14 @@
 
 This document describes the **actual PostgreSQL schema currently used** by the Jira-like project, based on Flyway migrations:
 
-- Current application schema: **15 tables and 119 columns** (`flyway_schema_history` is Flyway metadata and is not catalogued below).
+- Current application schema: **17 tables and 146 columns** (`flyway_schema_history` is Flyway metadata and is not catalogued below). The count includes generated `search_vector` columns on `issues` and `comments`.
 - `V12` and `V14` are data-only user/seed migrations, so they do not add tables or columns.
 - `V15` removes the former `work_logs` table; it is intentionally absent from the current table catalog.
-- `V16` adds and backfills `sprints.sprint_order`; `V17` removes obsolete type-like label rows without removing `issue_labels`.
+- `V16` adds and backfills `sprints.sprint_order`; `V17` removes obsolete type-like label rows from the legacy string-based label table.
+- `V18` replaces string labels with a space-scoped `labels` catalog plus `issue_labels` junction table, adds `sprint_issue_history`, and adds sprint metric columns.
+- `V19`–`V22` are data-only backfill/cleanup migrations for sprint metrics and label/point hygiene.
+- `V23`–`V25` add generated `search_vector` columns for full-text search, with separator normalization in V24 and V25.
+- `V26` enables `pg_trgm` and adds hybrid-search indexes (issue-key prefix + trigram fallback).
 
 - `V1__initial_schema.sql`
 - `V2__add_issue_history_and_work_logs.sql`
@@ -52,6 +58,15 @@ This document describes the **actual PostgreSQL schema currently used** by the J
 - `V15__drop_work_logs.sql`
 - `V16__sprint_order.sql`
 - `V17__remove_issue_type_labels.sql`
+- `V18__space_labels_and_sprint_history.sql`
+- `V19__backfill_completed_sprint_metrics.sql`
+- `V20__qualify_legacy_sprint_metrics.sql`
+- `V21__normalize_legacy_label_whitespace.sql`
+- `V22__clear_container_and_subtask_points.sql`
+- `V23__full_text_search.sql`
+- `V24__fts_normalize_separators.sql`
+- `V25__fts_normalize_tilde_plus.sql`
+- `V26__pg_trgm_hybrid_search.sql`
 
 ---
 
@@ -282,6 +297,14 @@ CREATE TABLE space_groups (
 | end_date | DATE | NULL | End date |
 | status | VARCHAR(20) | NOT NULL | Sprint status |
 | sprint_order | INTEGER | NOT NULL, default 0 | Manual future-sprint order within a space; V16 backfills all existing sprints |
+| initial_committed_points | INTEGER | NULL | Points committed at sprint start (Story/Task/Bug only); V18 |
+| initial_completed_points | INTEGER | NULL | Completed points at sprint start; V18 |
+| final_scope_points | INTEGER | NULL | Final scope points at sprint close; V18 |
+| completed_points | INTEGER | NULL | Completed points at sprint close; V18 |
+| initial_issue_count | INTEGER | NULL | Work items in initial scope; V18 |
+| completed_issue_count | INTEGER | NULL | Work items completed in the sprint; V18 |
+| final_issue_count | INTEGER | NULL | Work items remaining in final scope; V18 |
+| unestimated_issue_count | INTEGER | NULL | Story/Task/Bug items with null/zero points at close; V18 |
 | created_at | TIMESTAMPTZ(6) | NOT NULL | Created time |
 | updated_at | TIMESTAMPTZ(6) | NOT NULL | Updated time |
 
@@ -317,6 +340,15 @@ UPDATE sprints s
 SET sprint_order = ranked.ord
 FROM ranked
 WHERE s.id = ranked.id;
+
+ALTER TABLE sprints ADD COLUMN initial_committed_points INTEGER;
+ALTER TABLE sprints ADD COLUMN initial_completed_points INTEGER;
+ALTER TABLE sprints ADD COLUMN final_scope_points INTEGER;
+ALTER TABLE sprints ADD COLUMN completed_points INTEGER;
+ALTER TABLE sprints ADD COLUMN initial_issue_count INTEGER;
+ALTER TABLE sprints ADD COLUMN completed_issue_count INTEGER;
+ALTER TABLE sprints ADD COLUMN final_issue_count INTEGER;
+ALTER TABLE sprints ADD COLUMN unestimated_issue_count INTEGER;
 ```
 
 ---
@@ -341,6 +373,7 @@ WHERE s.id = ranked.id;
 | start_date | DATE | NULL | Start date |
 | due_date | DATE | NULL | Due date |
 | issue_order | INTEGER | NULL | Board/backlog ordering |
+| search_vector | TSVECTOR | GENERATED STORED | Full-text index over title (weight A) and description (weight B); V23–V25. Not mapped by JPA. |
 | created_at | TIMESTAMPTZ(6) | NOT NULL | Created time |
 | updated_at | TIMESTAMPTZ(6) | NOT NULL | Updated time |
 
@@ -349,6 +382,10 @@ WHERE s.id = ranked.id;
 - `idx_issue_sprint (sprint_id)`
 - `idx_issue_parent (parent_id)`
 - `idx_issue_key UNIQUE (issue_key)`
+- `idx_issue_search_vector GIN (search_vector)` — V23
+- `idx_issue_key_lower_pattern (lower(issue_key) text_pattern_ops)` — V26, exact/prefix key search
+- `idx_issue_title_trgm GIN (lower(title) gin_trgm_ops)` — V26, fuzzy fallback
+- `idx_issue_description_trgm GIN (lower(coalesce(description, '')) gin_trgm_ops)` — V26, fuzzy fallback
 
 **SQL:**
 
@@ -383,36 +420,137 @@ CREATE INDEX idx_issue_space ON issues (space_id);
 CREATE INDEX idx_issue_sprint ON issues (sprint_id);
 CREATE INDEX idx_issue_parent ON issues (parent_id);
 CREATE UNIQUE INDEX idx_issue_key ON issues (issue_key);
+
+ALTER TABLE issues
+    ADD COLUMN search_vector tsvector
+    GENERATED ALWAYS AS (
+        setweight(to_tsvector('english', regexp_replace(coalesce(title, ''), '[-_/.~+]+', ' ', 'g')), 'A') ||
+        setweight(to_tsvector('english', regexp_replace(coalesce(description, ''), '[-_/.~+]+', ' ', 'g')), 'B')
+    ) STORED;
+CREATE INDEX idx_issue_search_vector ON issues USING GIN (search_vector);
+
+CREATE INDEX idx_issue_key_lower_pattern ON issues (lower(issue_key) text_pattern_ops);
+CREATE INDEX idx_issue_title_trgm ON issues USING GIN (lower(title) gin_trgm_ops);
+CREATE INDEX idx_issue_description_trgm ON issues USING GIN (lower(coalesce(description, '')) gin_trgm_ops);
+```
+
+---
+
+### Table: labels
+
+Space-scoped label catalog introduced in **V18**. Replaces the legacy string-valued `issue_labels` table. Labels are case-insensitive via `normalized_name`; the first spelling used in a space is preserved in `name`.
+
+| Column | Type | Constraints | Description |
+| --- | --- | --- | --- |
+| id | BIGINT | PK, identity | Label id |
+| space_id | BIGINT | FK -> spaces(id), NOT NULL | Owning space |
+| name | VARCHAR(50) | NOT NULL | Display spelling |
+| normalized_name | VARCHAR(50) | NOT NULL | Case-insensitive key; internal whitespace collapsed (V21) |
+| created_at | TIMESTAMPTZ(6) | NOT NULL | Created time |
+| deleted_at | TIMESTAMPTZ(6) | NULL | Soft-delete timestamp |
+
+**Indexes / Constraints:**
+- `uk_labels_space_normalized UNIQUE (space_id, normalized_name)`
+- `idx_labels_space_active (space_id, deleted_at)`
+
+Reserved normalized names (`bug`, `story`, `epic`) belong in `issues.issue_type` and must not be created as labels. The internal `flagged` label is filtered from list APIs.
+
+**SQL:**
+
+```sql
+CREATE TABLE labels (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    space_id BIGINT NOT NULL,
+    name VARCHAR(50) NOT NULL,
+    normalized_name VARCHAR(50) NOT NULL,
+    created_at TIMESTAMP(6) WITH TIME ZONE NOT NULL,
+    deleted_at TIMESTAMP(6) WITH TIME ZONE,
+    CONSTRAINT fk_labels_space FOREIGN KEY (space_id) REFERENCES spaces (id),
+    CONSTRAINT uk_labels_space_normalized UNIQUE (space_id, normalized_name)
+);
+
+CREATE INDEX idx_labels_space_active ON labels (space_id, deleted_at);
 ```
 
 ---
 
 ### Table: issue_labels
 
-`V17` removes legacy labels whose normalized value is `bug`, `story`, or `epic`. Those values belong in
-`issues.issue_type`; the table remains available for all other user-defined labels.
+Junction table linking issues to catalog labels (**V18**). JPA maps this via `@ManyToMany` on `Issue.labels`.
 
 | Column | Type | Constraints | Description |
 | --- | --- | --- | --- |
-| issue_id | BIGINT | FK -> issues(id), NOT NULL | Issue id |
-| label | VARCHAR(50) | NOT NULL | Label value |
+| issue_id | BIGINT | FK -> issues(id), NOT NULL, PK | Issue id |
+| label_id | BIGINT | FK -> labels(id), NOT NULL, PK | Label id |
 
 **Indexes:**
+- `PRIMARY KEY (issue_id, label_id)`
 - `idx_issue_labels_issue (issue_id)`
+- `idx_issue_labels_label (label_id)`
 
 **SQL:**
 
 ```sql
 CREATE TABLE issue_labels (
     issue_id BIGINT NOT NULL,
-    label VARCHAR(50) NOT NULL,
-    CONSTRAINT fk_issue_labels_issue FOREIGN KEY (issue_id) REFERENCES issues (id)
+    label_id BIGINT NOT NULL,
+    CONSTRAINT pk_issue_labels PRIMARY KEY (issue_id, label_id),
+    CONSTRAINT fk_issue_labels_issue FOREIGN KEY (issue_id) REFERENCES issues (id),
+    CONSTRAINT fk_issue_labels_label FOREIGN KEY (label_id) REFERENCES labels (id)
 );
 
 CREATE INDEX idx_issue_labels_issue ON issue_labels (issue_id);
+CREATE INDEX idx_issue_labels_label ON issue_labels (label_id);
+```
 
-DELETE FROM issue_labels
-WHERE LOWER(TRIM(label)) IN ('bug', 'story', 'epic');
+---
+
+### Table: sprint_issue_history
+
+Historical sprint membership and estimate snapshots (**V18**). Rows remain after issues are carried over so completed-sprint reporting does not depend on the live `issues.sprint_id`.
+
+| Column | Type | Constraints | Description |
+| --- | --- | --- | --- |
+| id | BIGINT | PK, identity | History row id |
+| sprint_id | BIGINT | FK -> sprints(id), NOT NULL | Sprint id |
+| issue_id | BIGINT | NOT NULL | Issue id at time of snapshot |
+| issue_key | VARCHAR(30) | NOT NULL | Issue key snapshot |
+| issue_type | VARCHAR(20) | NOT NULL | Issue type snapshot |
+| initial_scope | BOOLEAN | NOT NULL | In sprint at start |
+| points_at_start | INTEGER | NULL | Story points at sprint start |
+| points_at_end | INTEGER | NULL | Story points at sprint close; cleared for epic/subtask (V22) |
+| status_at_end | VARCHAR(20) | NULL | Workflow status at close |
+| outcome | VARCHAR(20) | NULL | e.g. `completed`, `carried_over`, `removed` |
+| added_at | TIMESTAMPTZ(6) | NOT NULL | When the issue entered this sprint history row |
+| removed_at | TIMESTAMPTZ(6) | NULL | When the row was closed or superseded |
+
+**Indexes / Constraints:**
+- `uk_sprint_history_sprint_issue UNIQUE (sprint_id, issue_id)`
+- `idx_sprint_history_sprint (sprint_id)`
+- `idx_sprint_history_issue (issue_id)`
+
+**SQL:**
+
+```sql
+CREATE TABLE sprint_issue_history (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    sprint_id BIGINT NOT NULL,
+    issue_id BIGINT NOT NULL,
+    issue_key VARCHAR(30) NOT NULL,
+    issue_type VARCHAR(20) NOT NULL,
+    initial_scope BOOLEAN NOT NULL,
+    points_at_start INTEGER,
+    points_at_end INTEGER,
+    status_at_end VARCHAR(20),
+    outcome VARCHAR(20),
+    added_at TIMESTAMP(6) WITH TIME ZONE NOT NULL,
+    removed_at TIMESTAMP(6) WITH TIME ZONE,
+    CONSTRAINT fk_sprint_history_sprint FOREIGN KEY (sprint_id) REFERENCES sprints (id),
+    CONSTRAINT uk_sprint_history_sprint_issue UNIQUE (sprint_id, issue_id)
+);
+
+CREATE INDEX idx_sprint_history_sprint ON sprint_issue_history (sprint_id);
+CREATE INDEX idx_sprint_history_issue ON sprint_issue_history (issue_id);
 ```
 
 ---
@@ -425,11 +563,14 @@ WHERE LOWER(TRIM(label)) IN ('bug', 'story', 'epic');
 | issue_id | BIGINT | FK -> issues(id), NOT NULL | Issue id |
 | author_id | BIGINT | FK -> users(id), NOT NULL | Author user id |
 | content | TEXT | NOT NULL | Comment content |
+| search_vector | TSVECTOR | GENERATED STORED | Full-text index over content; V23–V25. Not mapped by JPA. |
 | created_at | TIMESTAMPTZ(6) | NOT NULL | Created time |
 | updated_at | TIMESTAMPTZ(6) | NOT NULL | Updated time |
 
 **Indexes:**
 - `idx_comment_issue (issue_id)`
+- `idx_comment_search_vector GIN (search_vector)` — V23
+- `idx_comment_content_trgm GIN (lower(content) gin_trgm_ops)` — V26, fuzzy fallback
 
 **SQL:**
 
@@ -446,6 +587,15 @@ CREATE TABLE comments (
 );
 
 CREATE INDEX idx_comment_issue ON comments (issue_id);
+
+ALTER TABLE comments
+    ADD COLUMN search_vector tsvector
+    GENERATED ALWAYS AS (
+        to_tsvector('english', regexp_replace(coalesce(content, ''), '[-_/.~+]+', ' ', 'g'))
+    ) STORED;
+CREATE INDEX idx_comment_search_vector ON comments USING GIN (search_vector);
+
+CREATE INDEX idx_comment_content_trgm ON comments USING GIN (lower(content) gin_trgm_ops);
 ```
 
 ---
@@ -663,7 +813,9 @@ CREATE INDEX idx_space_github_repos_space ON space_github_repos (space_id);
 
 - `spaces` -> `sprints` (1:N)
 - `spaces` -> `issues` (1:N)
+- `spaces` -> `labels` (1:N)
 - `issues` -> `comments` / `issue_history` / `issue_attachments` / `issue_code_links` (1:N)
+- `sprints` -> `sprint_issue_history` (1:N)
 
 This is the core work-management domain path.
 
@@ -675,12 +827,13 @@ This is the core work-management domain path.
 
 This supports both direct and group-based membership assignment.
 
-### Relationship 3: Issue graph model
+### Relationship 3: Issue graph and labeling
 
 - `issues.parent_id` supports parent-subtask hierarchy
 - `issue_links` supports arbitrary typed links across issues
+- `issues` <-> `labels` via `issue_labels` junction table
 
-Used for dependency graph and cross-ticket traceability.
+Used for dependency graph, cross-ticket traceability, and space-scoped tagging.
 
 ### Relationship 4: Dev integration model
 
@@ -688,12 +841,17 @@ Used for dependency graph and cross-ticket traceability.
 - `issue_code_links` stores issue-level links to PRs/commits/repos
 - `spaces.github_pat` enables per-space private repo access workflows
 
+### Relationship 5: Search support (read-only generated columns)
+
+- `issues.search_vector` and `comments.search_vector` are PostgreSQL generated columns maintained on every write
+- `GET /api/search` reads these columns plus V26 trigram indexes; no separate search index table exists in v1
+
 ---
 
 ## Notes on Implementation
 
 1. **Schema ownership**
-   - Schema is managed by Flyway migrations (`V1`..`V17`)
+   - Schema is managed by Flyway migrations (`V1`..`V26`)
    - JPA is configured with validation mode (`ddl-auto: validate`)
 
 2. **Issue identifiers**
@@ -714,12 +872,18 @@ Used for dependency graph and cross-ticket traceability.
 
 6. **Index strategy**
    - Foreign key columns for high-frequency lookups are indexed
-   - Unique constraints enforce domain invariants (space key, issue key, membership uniqueness, repo uniqueness)
+   - Unique constraints enforce domain invariants (space key, issue key, membership uniqueness, repo uniqueness, label normalization per space)
+   - Full-text and trigram indexes support `GET /api/search` without a separate search service
 
 7. **Deletion behavior**
    - Most FKs use default PostgreSQL behavior (restrict if referenced)
    - No broad cascade chains are defined in current schema; deletes should be orchestrated by service logic
-   - `spaces` uses soft-delete semantics via `deleted_at` with active-row uniqueness on `space_key`
+   - `spaces` and `labels` use soft-delete semantics via `deleted_at`
 
 8. **Removed work-log feature**
    - `V15` drops the legacy `work_logs` table; it is not part of the current schema
+   - The SPA may still show a **Work log** activity tab, but it renders **status lifecycle** derived from `issue_history`, not time-entry rows
+
+9. **Sprint reporting**
+   - Completed sprint metrics on `sprints` are derived from `sprint_issue_history`
+   - `V19`–`V22` backfill and sanitize legacy metric rows; point totals may be `NULL` when history would be misleading

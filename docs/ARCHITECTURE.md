@@ -164,7 +164,7 @@ sequenceDiagram
 
 | 目標元件 | 目前實作 |
 |----------|----------|
-| React 前端 | 獨立 repo **`jira-agentic-ai-web`** |
+| React 前端 | 獨立 repo **`sprint-orchestra-studio`** |
 | API Gateway | **`gateway`** 子專案 |
 | Core Platform（含附件 + Kafka publish） | **`jira-backend`** |
 | Kafka | Compose + optional producer；**`tmp-kafka-consumer-poc`** 僅 POC |

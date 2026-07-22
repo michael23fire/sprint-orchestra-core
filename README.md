@@ -1,6 +1,6 @@
 # Jira Agentic AI
 
-Full-stack **Jira-style** workspace demo: **Spring Boot 3** REST API plus a **React (Vite)** SPA that lives in a **separate repository** (`jira-agentic-ai-web`), with **PostgreSQL**, **Redis** cache, **Flyway** migrations, and gateway-side **JWT** validation (OAuth2 Resource Server) for protected APIs.
+Full-stack **Jira-style** workspace demo: **Spring Boot 3** REST API plus a **React (Vite)** SPA that lives in a **separate repository** (`sprint-orchestra-studio`), with **PostgreSQL**, **Redis** cache, **Flyway** migrations, and gateway-side **JWT** validation (OAuth2 Resource Server) for protected APIs.
 
 ---
 
@@ -59,7 +59,7 @@ Full-stack **Jira-style** workspace demo: **Spring Boot 3** REST API plus a **Re
 ## Repository layout
 
 ```
-jira-agentic-ai/
+sprint-orchestra-core/
 ├── docker-compose.yml              # PostgreSQL + Redis + MinIO + Kafka (+ Kafka UI)
 ├── build.gradle.kts                # aggregator (group/version + shared repos)
 ├── settings.gradle.kts             # multi-module: jira-backend + gateway + tmp-kafka-consumer-poc
@@ -67,8 +67,8 @@ jira-agentic-ai/
 ├── README.md
 ├── docs/                            # Architecture, API design, schema, and ER diagram
 │   ├── ARCHITECTURE.md
-│   ├── API_DESIGN_CORE_FINAL_v1.md
-│   ├── DATABASE_SCHEMA_CORE_FINAL_v1.md
+│   ├── API_DESIGN_CORE.md
+│   ├── DATABASE_SCHEMA_CORE.md
 │   └── visual-er-diagram.html
 ├── jira-backend/                   # Spring Boot REST API (main app)
 │   ├── build.gradle.kts
@@ -84,15 +84,15 @@ jira-agentic-ai/
     └── src/main/java/com/jiraagentic/poc/kafka/
 ```
 
-The **SPA** is not in this tree: clone or check out **`jira-agentic-ai-web`** (sibling repo / folder at repo root with `package.json`, `vite.config.ts`, `src/`, etc.).
+The **SPA** is not in this tree: clone or check out **`sprint-orchestra-studio`** (sibling repo / folder at repo root with `package.json`, `vite.config.ts`, `src/`, etc.).
 
 ---
 
 ## Core docs
 
 - [Target architecture](./docs/ARCHITECTURE.md) (Kafka / vectorization / AI / observability)
-- [API design](./docs/API_DESIGN_CORE_FINAL_v1.md)
-- [Database schema](./docs/DATABASE_SCHEMA_CORE_FINAL_v1.md)
+- [API design](./docs/API_DESIGN_CORE.md)
+- [Database schema](./docs/DATABASE_SCHEMA_CORE.md)
 - [Visual ER diagram](./docs/visual-er-diagram.html)
 
 ---
@@ -176,7 +176,7 @@ flowchart TB
 
 - **JDK 17**
 - **Docker** + Docker Compose (recommended for Postgres, Redis, MinIO; add Kafka services when exercising attachment → Kafka POC)
-- **Node.js 20+** (or compatible) and **npm** for the SPA (**jira-agentic-ai-web** repo)
+- **Node.js 20+** (or compatible) and **npm** for the SPA (**sprint-orchestra-studio** repo)
 
 ---
 
@@ -184,10 +184,10 @@ flowchart TB
 
 ### 1. Start Docker Compose (from this repo root)
 
-Run in the directory that contains **`docker-compose.yml`** (the **`jira-agentic-ai`** repo root):
+Run in the directory that contains **`docker-compose.yml`** (the **`sprint-orchestra-core`** repo root):
 
 ```bash
-cd /path/to/jira-agentic-ai
+cd /path/to/sprint-orchestra-core
 docker compose up -d
 # docker-compose up -d   # if your Docker CLI uses the legacy command
 docker ps
@@ -220,18 +220,24 @@ MinIO console: `http://localhost:9001`
 ./gradlew :jira-backend:bootRun
 ```
 
-Default: **http://localhost:8080**
+Serves the API directly on **http://localhost:8081** (see `server.port` in `jira-backend/src/main/resources/application.yml`). Requires Postgres, Redis, and MinIO to be reachable using `application.yml` defaults.
 
-For the edge gateway module (when configured): `./gradlew :gateway:bootRun`.
+**8081 is not the URL the SPA or the smoke test below use.** They go through the gateway.
 
-Requires Postgres, Redis, and MinIO to be reachable using `application.yml` defaults.
-
-### 3. Run the SPA (separate repo)
-
-Check out **`jira-agentic-ai-web`** next to this project (or anywhere), then:
+### 3. Run the gateway
 
 ```bash
-cd jira-agentic-ai-web   # path to the standalone Vite app
+./gradlew :gateway:bootRun
+```
+
+Listens on **http://localhost:8080** and proxies `/api/**`, Swagger, and OAuth2/login paths to the backend on 8081 (see `gateway/src/main/resources/application.yml`). This is the entry point browsers and the SPA should call — never point the SPA at 8081 directly, since the browser can't send the internal `X-Gateway-Internal` trust header the backend requires.
+
+### 4. Run the SPA (separate repo)
+
+Check out **`sprint-orchestra-studio`** next to this project (or anywhere), then:
+
+```bash
+cd sprint-orchestra-studio   # path to the standalone Vite app
 npm install
 npm run dev
 ```
@@ -240,7 +246,7 @@ Default Vite dev server: **http://localhost:5173**
 
 Point the SPA at the API (see [Frontend](#frontend)); backend still expects `FRONTEND_BASE_URL` / `app.frontend.base-url` (default `http://localhost:5173`) for OAuth redirects.
 
-### 4. Smoke test
+### 5. Smoke test
 
 - Health / root: `GET http://localhost:8080/`
 - Obtain JWT:
@@ -341,6 +347,7 @@ Base URL: **`/api`**
 | Sprints | `/api/spaces/{spaceId}/sprints`, `.../{id}/complete`, `.../{id}/reorder` |
 | Issues | `/api/spaces/{spaceId}/issues` |
 | Comments | `/api/issues/{issueId}/comments` (`issueId` = numeric issue id) |
+| Search | `GET /api/search?q=&limit=` — full-text search over issue title/description and comments, scoped to the caller's active spaces |
 
 Exact verbs and bodies: use **Swagger** or read controller classes under `controller/`.
 
@@ -359,12 +366,12 @@ With the backend running:
 
 ## Frontend
 
-The browser UI lives only in the **`jira-agentic-ai-web`** repository (not under this repo). Clone it and follow its `README.md`.
+The browser UI lives only in the **`sprint-orchestra-studio`** repository (not under this repo). Clone it and follow its `README.md`.
 
-- **API base URL:** `VITE_API_URL` (Vite env). If unset, defaults to **`http://localhost:8080`** (see `src/api/client.ts` in that repo).
+- **API base URL:** `VITE_API_URL` (Vite env). If unset, defaults to **`http://localhost:8080`** — the **gateway**, not the backend's own 8081 (see `src/api/client.ts` in that repo, which warns at dev time if pointed at 8081).
 - **Auth token:** stored in `localStorage` under `jira_auth_token`; attached automatically to API calls.
 
-**Example `.env.local` in `jira-agentic-ai-web/` (not committed):**
+**Example `.env.local` in `sprint-orchestra-studio/` (not committed):**
 
 ```env
 VITE_API_URL=http://localhost:8080
@@ -374,7 +381,7 @@ VITE_API_URL=http://localhost:8080
 
 **Main routes (authenticated):** `/spaces`, `/groups`, `/space`, `/board`, `/backlog`, `/ticket/:ticketId`, etc.; `/login` is public.
 
-See **`jira-agentic-ai-web/README.md`** for SPA-specific behaviour (description embed vs attachment panel uploads).
+See **`sprint-orchestra-studio/README.md`** for SPA-specific behaviour (description embed vs attachment panel uploads).
 
 ---
 
@@ -399,10 +406,10 @@ See **`jira-agentic-ai-web/README.md`** for SPA-specific behaviour (description 
 ./gradlew :jira-backend:bootJar    # artifact: jira-backend/build/libs/*.jar
 ```
 
-### SPA (`jira-agentic-ai-web`)
+### SPA (`sprint-orchestra-studio`)
 
 ```bash
-cd jira-agentic-ai-web
+cd sprint-orchestra-studio
 npm run build        # tsc -b && vite build → dist/
 npm run lint
 npm run preview      # local preview of production build

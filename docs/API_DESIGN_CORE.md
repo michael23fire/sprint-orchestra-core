@@ -17,6 +17,8 @@
   - [10. Issue Link Endpoints](#10-issue-link-endpoints)
   - [11. Code Link Endpoints](#11-code-link-endpoints)
   - [12. Space GitHub Repo Endpoints](#12-space-github-repo-endpoints)
+  - [13. Label Endpoints](#13-label-endpoints)
+  - [14. Search Endpoints](#14-search-endpoints)
   - [Error Response Pattern](#error-response-pattern)
 
 ---
@@ -286,6 +288,24 @@ This section adds the "when/why/what" for every API family so readers can unders
 
 **Why:** discover issue references and keep links up to date; **What:** scans repo activity and returns scan stats.
 
+### 13) Labels
+
+- `GET /api/spaces/{spaceId}/labels` - **When:** label picker or space settings loads;
+
+**Why:** show the space-scoped label catalog; **What:** returns active labels for the space (excludes soft-deleted and the internal `flagged` label).
+- `POST /api/spaces/{spaceId}/labels` - **When:** user creates a new label from settings or inline picker;
+
+**Why:** add a reusable tag to the space catalog; **What:** creates or reactivates a label and returns `LabelDto`. Reserved names (`bug`, `story`, `epic`, `flagged`) are rejected.
+- `DELETE /api/spaces/{spaceId}/labels/{labelId}` - **When:** user removes a label from the space catalog;
+
+**Why:** retire a label without deleting historical issue rows; **What:** soft-deletes the label, removes it from all issues in the space, and records label history events.
+
+### 14) Search
+
+- `GET /api/search?q=&limit=` - **When:** global quick-search box is used in the SPA;
+
+**Why:** find issues and comments across all spaces the caller can access; **What:** returns ranked hybrid search hits scoped to the authenticated user's active space memberships. Empty or blank `q` returns an empty list.
+
 ---
 
 ## Response Body Templates (Shared)
@@ -355,11 +375,51 @@ The endpoint-specific section still defines status code, purpose, request, and p
   "startDate": "2026-04-15",
   "endDate": "2026-04-28",
   "status": "future",
-  "sprintOrder": 2
+  "sprintOrder": 2,
+  "initialCommittedPoints": 34,
+  "initialCompletedPoints": 0,
+  "finalScopePoints": 42,
+  "completedPoints": 38,
+  "initialIssueCount": 12,
+  "completedIssueCount": 10,
+  "finalIssueCount": 14,
+  "unestimatedIssueCount": 1,
+  "commitmentCompletionPercent": 0,
+  "finalScopeCompletionPercent": 90
 }
 ```
 
-Current service logic uses lowercase sprint statuses: `future`, `active`, and `completed`.
+Current service logic uses lowercase sprint statuses: `future`, `active`, and `completed`. Metric columns are populated when a sprint is completed and are derived from `sprint_issue_history`. Percent fields are computed in `SprintDto.from` and may be `null` when the underlying totals are missing or zero.
+
+### `LabelDto`
+
+```json
+{
+  "id": 501,
+  "spaceId": 10,
+  "name": "Frontend"
+}
+```
+
+### `SearchResultDto`
+
+```json
+{
+  "type": "ISSUE",
+  "matchType": "FULL_TEXT",
+  "spaceId": 10,
+  "issueId": 1001,
+  "issueKey": "PLT-42",
+  "title": "Fix drag order mismatch",
+  "snippet": "... board view repro ...",
+  "rank": 1042.5,
+  "updatedAt": "2026-04-29T20:05:00Z"
+}
+```
+
+- `type`: `ISSUE` or `COMMENT`
+- `matchType`: `EXACT_KEY`, `FULL_TEXT`, or `FUZZY`
+- For `COMMENT` hits, `title` holds the parent issue title and `issueId` / `issueKey` identify that parent issue
 
 ### `IssueDto`
 
@@ -2521,6 +2581,156 @@ See the shared `IssueCodeLinkDto` template.
   ],
   "warnings": []
 }
+```
+
+---
+
+## 13. Label Endpoints
+
+### 13.1 List Space Labels
+
+**Purpose:** Retrieve the active label catalog for one space.
+
+**When called:** label picker, filter panel, or space label settings loads.
+
+**Why:** UI needs selectable labels scoped to the current space.
+
+**After call:** backend returns active labels ordered by name. Soft-deleted labels and the internal `flagged` label are omitted.
+
+**Persistence (data layer)**
+
+**Tables:** `labels`  
+**Flow:** `LabelController.getBySpace` → `LabelService.findBySpace` → `LabelRepository.findBySpace_IdAndDeletedAtIsNullOrderByNameAsc`
+
+**Endpoint:** `/api/spaces/{spaceId}/labels`  
+**Method:** `GET`
+
+**Response:** (200 OK) `LabelDto[]`
+
+See the shared `LabelDto` template.
+
+---
+
+### 13.2 Create Space Label
+
+**Purpose:** Create or reactivate a label in the space catalog.
+
+**When called:** user submits a new label name from settings or an inline create action.
+
+**Why:** add a reusable tag that can be assigned to issues in this space.
+
+**After call:** backend normalizes the name, rejects reserved values (`bug`, `story`, `epic`, `flagged`), creates a new row or reactivates a soft-deleted row with the same normalized name, and returns `LabelDto`.
+
+**Persistence (data layer)**
+
+**Tables:** `labels`, `spaces`  
+**Flow:** `LabelController.create` → `LabelService.create` → `SpaceRepository.findActiveByIdForUpdate` + `LabelRepository.save`
+
+**Endpoint:** `/api/spaces/{spaceId}/labels`  
+**Method:** `POST`
+
+**Request Body:**
+
+```json
+{
+  "name": "Frontend"
+}
+```
+
+**Response:** (200 OK) `LabelDto`
+
+**Error Response:** (400 Bad Request) when the name is blank, too long (> 50 characters), or reserved.
+
+---
+
+### 13.3 Delete Space Label
+
+**Purpose:** Soft-delete a label and remove it from all issues in the space.
+
+**When called:** user deletes a label from space settings.
+
+**Why:** retire a label from the catalog while preserving issue history.
+
+**After call:** backend removes the label from every linked issue, records `labels` field changes in `issue_history`, sets `labels.deleted_at`, and returns no-content success.
+
+**Persistence (data layer)**
+
+**Tables:** `labels`, `issue_labels`, `issues`, `issue_history`  
+**Flow:** `LabelController.delete` → `LabelService.delete` → `IssueRepository.findDistinctByLabels_Id` + `IssueRepository.saveAll` + `LabelRepository.save`
+
+**Endpoint:** `/api/spaces/{spaceId}/labels/{labelId}`  
+**Method:** `DELETE`
+
+**Response:** (204 No Content)
+
+---
+
+## 14. Search Endpoints
+
+### 14.1 Hybrid Search
+
+**Purpose:** Search issues and comments across all spaces the caller can access.
+
+**When called:** global quick-search UI submits a query.
+
+**Why:** let users jump to relevant tickets or comment threads without opening each space separately.
+
+**After call:** backend returns up to `limit` ranked hits using a tiered hybrid strategy:
+
+1. **Exact/prefix issue-key match** (`matchType = EXACT_KEY`) — always highest priority.
+2. **Full-text search** (`matchType = FULL_TEXT`) — PostgreSQL `tsvector` / `websearch_to_tsquery` over issue title/description and comment content, with separator normalization for `-`, `_`, `/`, `.`, `~`, `+`.
+3. **Fuzzy fallback** (`matchType = FUZZY`) — `pg_trgm` `word_similarity()` over title/description/content, consulted only when tiers 1–2 underfill the requested page size and the query is at least three characters.
+
+Results are deduplicated per issue/comment, sorted by a disjoint tier offset plus native rank, and capped at 50 rows.
+
+**Persistence (data layer)**
+
+**Tables:** `space_members`, `issues`, `comments` (read-only; uses generated `search_vector` columns and trigram indexes)  
+**Flow:** `SearchController.search` → `SearchService.search` → `SpaceMemberRepository.findActiveSpaceIdsByUserId` + `IssueRepository.searchByKeyPrefix` / `search` / `searchFuzzy` + `CommentRepository.search` / `searchFuzzy`
+
+**Endpoint:** `/api/search`  
+**Method:** `GET`
+
+**Query Parameters:**
+
+- `q` (string, required) — search text; blank values return `[]`
+- `limit` (integer, optional) — max results; default `20`, clamped to `1..50`
+
+**Response:** (200 OK) `SearchResultDto[]`
+
+See the shared `SearchResultDto` template.
+
+**Example:**
+
+```http
+GET /api/search?q=checkout+idempotency&limit=10
+```
+
+```json
+[
+  {
+    "type": "ISSUE",
+    "matchType": "FULL_TEXT",
+    "spaceId": 10,
+    "issueId": 1001,
+    "issueKey": "PLT-42",
+    "title": "Make checkout idempotent",
+    "snippet": "... duplicate submit must not create two orders ...",
+    "rank": 1042.5,
+    "updatedAt": "2026-04-29T20:05:00Z"
+  },
+  {
+    "type": "COMMENT",
+    "matchType": "FULL_TEXT",
+    "spaceId": 10,
+    "issueId": 1001,
+    "issueKey": "PLT-42",
+    "title": "Make checkout idempotent",
+    "snippet": "... verified idempotency key in sandbox ...",
+    "rank": 1038.1,
+    "updatedAt": "2026-04-28T16:20:00Z"
+  }
+]
 ```
 
 ---
