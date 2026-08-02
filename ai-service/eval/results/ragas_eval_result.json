@@ -1,0 +1,103 @@
+{
+  "means": {
+    "faithfulness": 0.639,
+    "answer_relevancy": 0.541,
+    "context_precision": 0.556,
+    "context_recall": 0.417
+  },
+  "structured_only_excluded": [
+    "How many bugs are there in total, and how many are still open?",
+    "Which issues are the real subtasks of ATC-43?",
+    "Why was ATC-68 reopened?",
+    "Which epic does ATC-43 belong to?",
+    "How many issues are in the currently active sprint?",
+    "How many sprints are there in total, and how many of them are completed?"
+  ],
+  "per_sample": [
+    {
+      "user_input": "What was the root cause of the checkout double-order bug, ATC-43?",
+      "retrieved_contexts": [
+        "Checkout can create two orders from a double click Context During the private beta, a slow checkout allowed two Place order clicks. Two order records were created and stock was reduced twice. Only one sandbox payment succeeded. We need a safe mitigation and follow-up fixes. Bug report When / environment: Private-beta build beta-1.0.0 in Chrome with Slow 3G and one Desk Lamp in the cart. Steps to reproduce: Use the accepted sandbox card and click Place order twice before the pending state appears. Expected behavior: One checkout attempt returns one order, captures one sandbox payment, and reduces stock once. Actual behavior: Orders BETA-1042 and BETA-1043 are inserted and stock falls by two, although only one payment is captured. Subtasks ATC-44 \u2014 Reject repeated checkout requests The permanent fix is an API idempotency check before order insert. Tracking it separately lets backend deploy the technical fix without mixing it into incident coordination. ATC-45 \u2014 Disable Place order while checkout is pending Browser repeat-click mitigation reduces customer exposure before the API fix lands. Frontend can ship the disabled Place order state while the incident remains open. ATC-47 \u2014 Cover slow checkout in regression tests The slow double-click reproduction needs a repeatable browser regression, not a one-off manual retest. The subtask owns automated exit criteria tied to the checkout test plan. Acceptance criteria AC1 \u2014 The report records one intended checkout, the two resulting orders, the stock impact, and the payment outcome. AC2 \u2014 Frontend mitigation and API idempotency stop a repeat action from creating another order. AC3 \u2014 The incident remains open until stock recovery and slow-browser regression work are complete. Estimate reasoning 5 \u2014 Investigation crosses browser behavior, gateway logs, order inserts, payment outcome, and stock impact. Mitigation and permanent fixes are split into subtasks, but coordination, customer communication, and exit verification remain on the incident.",
+        "ATC-44 now returns the first order result for a repeated key. The attached duplicate-checkout-requests.log is the redacted gateway/API evidence that ruled out a proxy retry: two request IDs reached the API with retry_count=0. I am keeping the incident open until Daniel finishes ATC-47.",
+        "I found the second insert. We create the order before checking whether this checkout request was already handled.",
+        "Sprint 3 completion Closing the duplicate-order incident after idempotency, pending-button mitigation, stock recovery design, and slow-browser regression all reached verified owners. No duplicate beta order was reported after beta-1.0.2.",
+        "Reproduced in Chrome with Slow 3G. Click Place order twice before the spinner appears. Two order rows show up and stock drops by two.",
+        "Deployed the API fix to beta as build beta-1.0.2. Request logs show the same key returning one order ID."
+      ],
+      "response": "\n\nThe root cause of the ATC-43 checkout double-order bug was that **the API created the order record before checking whether the same checkout request had already been handled** (ATC-43). This lack of an idempotency check meant that when a shopper clicked \"Place order\" twice (possible on slow connections like Slow 3G before the pending state appeared), both requests reached the API and each created a separate order record, resulting in two orders (BETA-1042 and BETA-1043) and double stock deduction.\n\nThe permanent fix (ATC-44) added an API idempotency check so that repeated checkout requests with the same key return the first order result instead of inserting a new one.",
+      "reference": "The root cause was that the API created the order before checking whether the checkout request had already been handled, so a double-click on Place order (with no idempotency protection) created two separate order records instead of one.",
+      "faithfulness": 0.8181818181818182,
+      "answer_relevancy": 0.943910377150239,
+      "context_precision": 0.8333333332916666,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "Why was ATC-30 reopened?",
+      "retrieved_contexts": [
+        "Verification result PASS \u2014 a normal request and five repeated requests produce one order, one item snapshot set, and one stock reduction. Acceptance criteria checked AC1 \u2014 PASS An accepted checkout creates one order with item-price snapshots, shipping details, payment reference, and readable order number. AC2 \u2014 PASS The stock check, stock reduction, order insert, and idempotency record succeed or roll back together. AC3 \u2014 PASS Five submissions with the same checkout key return the first order and reduce stock once. Close decision every acceptance criterion above passed; any separate follow-up remains on its linked issue.",
+        "Reopening this because the beta incident shows that one browser action can submit twice. The story is not complete until the API handles a repeated request safely.",
+        "The order endpoint now uses the checkout idempotency key before insert. The focused API test passes; the slow-browser regression remains under ATC-47.",
+        "Order creation and item snapshots are in staging. This reviewed diagram records where the checkout key must be checked relative to payment, order insert, and stock change: Attached evidence",
+        "One normal checkout creates one order and reduces stock once. Marking the planned happy path verified."
+      ],
+      "response": "\n\nATC-30 was reopened because a beta incident revealed that a single browser action could submit twice. As noted in the comments, the story was not considered complete until the API handled repeated requests safely (idempotency). The issue was subsequently updated to use a checkout idempotency key before the order insert, and it was closed again after verification confirmed that five repeated requests with the same checkout key produced only one order and one stock reduction.",
+      "reference": "ATC-30 was reopened by Noah Kim on 2026-05-14 after a beta incident showed that one browser action could submit twice; it was not considered complete until the API could safely handle a repeated request.",
+      "faithfulness": 0.5714285714285714,
+      "answer_relevancy": 0.870407357342135,
+      "context_precision": 0.49999999995,
+      "context_recall": 0.0
+    },
+    {
+      "user_input": "Which epic does ATC-59 belong to?",
+      "retrieved_contexts": [
+        "No relevant information was found in the knowledge base for this query."
+      ],
+      "response": "There is no information about this in the knowledge base.",
+      "reference": "ATC-59 belongs to the epic ATC-49.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.0,
+      "context_precision": 0.0,
+      "context_recall": 0.0
+    },
+    {
+      "user_input": "What is ATC-59 about?",
+      "retrieved_contexts": [
+        "Cart merge doubles a matching SKU Context A shopper with two mugs in an account cart and one in a guest cart sees six after sign-in because the merge callback runs twice. Bug report When / environment: Private beta, Chrome 127, account cart quantity 2 and guest cart quantity 1 for SKU F-612. Steps to reproduce: Add one mug as a guest, sign into an account that already has two, then refresh the callback route. Expected behavior: The merged cart contains three mugs once. Actual behavior: The first callback shows three and the retry doubles the account quantity to six. Acceptance criteria AC1 \u2014 The example carts merge to quantity three, not six, when stock is available. Estimate reasoning 3 \u2014 The faulty calculation is straightforward, but the fix must preserve idempotency under callback retry and verify multiple overlap patterns. No schema migration is required. Attached reference: Issue-opening diagnostic for ATC-59, preserving the observed error plus explicit expected and actual output so engineering can reproduce the bug without guessing. [file] cart-merge-doubles-a-matching-sku-diagnostic.log",
+        "Cart merge doubles a matching SKU Context A shopper with two mugs in an account cart and one in a guest cart sees six after sign-in because the merge callback runs twice. Bug report When / environment: Private beta, Chrome 127, account cart quantity 2 and guest cart quantity 1 for SKU F-612. Steps to reproduce: Add one mug as a guest, sign into an account that already has two, then refresh the callback route. Expected behavior: The merged cart contains three mugs once. Actual behavior: The first callback shows three and the retry doubles the account quantity to six. Acceptance criteria AC1 \u2014 The example carts merge to quantity three, not six, when stock is available. Estimate reasoning 3 \u2014 The faulty calculation is straightforward, but the fix must preserve idempotency under callback retry and verify multiple overlap patterns. No schema migration is required. Attached reference: Issue-opening diagnostic for ATC-59, preserving the observed error plus explicit expected and actual output so engineering can reproduce the bug without guessing. [file] cart-merge-doubles-a-matching-sku-diagnostic.log",
+        "Work update The callback now stores and returns the first merge result before clearing the guest token; repeated callbacks no longer recalculate quantities. What is included 3 \u2014 The faulty calculation is straightforward, but the fix must preserve idempotency under callback retry and verify multiple overlap patterns. No schema migration is required.",
+        "Verification result PASS \u2014 the checks below passed in the test environment. Acceptance criteria checked AC1 \u2014 PASS The example carts merge to quantity three, not six, when stock is available. Close decision All acceptance criteria passed. Any follow-up work stays on its own issue.",
+        "Related to ATC-56 The bug is a retry failure in the merge behavior delivered by ATC-56, while its reproduction and verification stay on the bug. Each issue still keeps its own work and verification."
+      ],
+      "response": "\n\nATC-59 is a bug titled **\"Cart merge doubles a matching SKU\"** (ATC-59). \n\nIt describes an issue where a shopper with two mugs in their account cart and one mug in a guest cart sees six mugs after signing in, because the cart merge callback runs twice. The first callback correctly merges to three mugs, but a retry doubles the account quantity to six.\n\n**Key details:**\n- **Environment:** Private beta, Chrome 127, SKU F-612\n- **Steps to reproduce:** Add one mug as a guest, sign into an account that already has two, then refresh the callback route.\n- **Expected behavior:** The merged cart contains three mugs once.\n- **Actual behavior:** The retry doubles the account quantity to six.\n- **Acceptance criteria (AC1):** The example carts merge to quantity three, not six, when stock is available.\n- **Fix:** The callback now stores and returns the first merge result before clearing the guest token, so repeated callbacks no longer recalculate quantities. The fix preserves idempotency under callback retry (ATC-59).\n- **Status:** Verification passed; all acceptance criteria met.",
+      "reference": "ATC-59 is a bug where merging a guest cart into an account cart during sign-in doubles a matching SKU's quantity, because the merge callback runs twice instead of once.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.6479885743866,
+      "context_precision": 0.9999999999666667,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "Is there any blocked issue in the workspace, and what is it about?",
+      "retrieved_contexts": [
+        "Cache the public product catalog safely Context Reduce repeated catalog reads for the public beta without serving inactive products or hiding a seller update for too long. Acceptance criteria AC1 \u2014 Repeated public catalog requests meet the cache-hit latency target under the agreed load. Estimate reasoning 5 \u2014 This combines cache keys, invalidation, fallback, load tests, and observability. Personalized catalog responses and multi-region cache replication are excluded."
+      ],
+      "response": "\n\nYes, there is one blocked issue: **ATC-77** (story). It is about caching the public product catalog safely \u2014 specifically, reducing repeated catalog reads for the public beta without serving inactive products or hiding a seller update for too long. The acceptance criterion requires that repeated public catalog requests meet the cache-hit latency target under the agreed load.",
+      "reference": "Yes \u2014 ATC-77 ('Cache the public product catalog safely') is the only blocked issue. It is about caching the public product catalog, not related to checkout or payments.",
+      "faithfulness": 0.4444444444444444,
+      "answer_relevancy": 0.7836858072395548,
+      "context_precision": 0.0,
+      "context_recall": 0.0
+    },
+    {
+      "user_input": "What was our AWS bill last month?",
+      "retrieved_contexts": [
+        "No relevant information was found in the knowledge base for this query."
+      ],
+      "response": "There is no information about this in the knowledge base.",
+      "reference": "There is no information about this in the knowledge base \u2014 this workspace contains no financial, cost, or AWS billing data.",
+      "faithfulness": 0.0,
+      "answer_relevancy": 0.0,
+      "context_precision": 0.9999999999,
+      "context_recall": 0.5
+    }
+  ]
+}

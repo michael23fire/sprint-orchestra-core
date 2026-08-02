@@ -1,0 +1,1314 @@
+[
+  {
+    "id": 1,
+    "facet": "comment-ingest",
+    "turns": [
+      {
+        "answer": "\n\nBased on ATC-43, here's how the double-click checkout bug was reproduced and what the request logs showed:\n\n**Reproduction steps** (ATC-43):\n- Environment: Private-beta build `beta-1.0.0` in Chrome with **Slow 3G** throttling and one Desk Lamp in the cart.\n- Action: Use an accepted sandbox card and click **Place order twice** before the pending state (spinner) appears.\n- Result: Two order records (`BETA-1042` and `BETA-1043`) were inserted, stock dropped by two, but only one sandbox payment was captured.\n\n**What the request logs showed** (ATC-43):\n- Both requests reached the API and returned **201** (created). There was no proxy retry involved.\n- The attached `duplicate-checkout-requests.log` confirmed **two distinct request IDs** reached the API with `retry_count=0`, ruling out a proxy retry.\n- The root cause: the order is created **before** checking whether this checkout request was already handled, so both clicks resulted in separate order inserts.\n\nThis led to the permanent fix (ATC-44) adding an API idempotency check before order insertion, and the immediate browser mitigation (ATC-45) disabling the Place Order button as soon as submission starts.",
+        "abstained": false,
+        "retrievalRounds": 3,
+        "queriesUsed": [
+          "double-click checkout bug reproduced request logs"
+        ],
+        "citations": [
+          {
+            "key": "ATC-43",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-43",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          }
+        ],
+        "elapsed": 69.2,
+        "question": "How was the double-click checkout bug reproduced, and what did the request logs show?",
+        "turn": 1
+      },
+      {
+        "answer": "\n\nBased on the incident report and its follow-up fix, the actual root cause was a **missing API idempotency check before order insertion** (ATC-43, ATC-44). \n\nSpecifically:\n* **Backend gap:** The API processed every incoming checkout request as a new order creation without verifying if it had already handled that specific request. The permanent fix (ATC-44) was explicitly scoped to add this idempotency check before the order insert step (ATC-43).\n* **Frontend trigger:** Because the checkout was slow (reproduced under Slow 3G), it allowed a user to click \"Place order\" twice before the pending state appeared, sending two separate requests to the server (ATC-43).\n* **Confirmed distinct requests:** Request logs showed two distinct request IDs reaching the API with `retry_count=0`, confirming these were intentional duplicate user clicks that the unguarded API blindly accepted, rather than a network proxy retry (ATC-43).",
+        "abstained": false,
+        "retrievalRounds": 4,
+        "queriesUsed": [
+          "root cause double click checkout ATC-43",
+          "ATC-43 root cause order created before checking idempotency",
+          "ATC-43 order created before checking idempotency root cause"
+        ],
+        "citations": [
+          {
+            "key": "ATC-43",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-44",
+            "type": "comment"
+          }
+        ],
+        "elapsed": 117.0,
+        "question": "What was the actual root cause behind those two orders being created?",
+        "turn": 2
+      },
+      {
+        "answer": "\n\nBased on the explicit breakdown in ATC-43 (\"Split the follow-up into ATC-44... ATC-45... and ATC-47. Stock correction stays on ATC-46\"), the follow-ups should be characterized as three split-off subtasks and one separate related issue:\n\n**Split-off subtasks (direct incident fixes):**\n1. **ATC-44** \u2014 *Reject repeated checkout requests*: The permanent API fix, adding an idempotency key check before order insertion.\n2. **ATC-45** \u2014 *Disable Place order while checkout is pending*: The immediate browser mitigation, disabling the button as soon as submission starts.\n3. **ATC-47** \u2014 *Cover slow checkout in regression tests*: The exit-criteria test, adding a repeatable slow-response browser test.\n\n**Separate related issue:**\n4. **ATC-46** \u2014 *Restore stock after a duplicate beta order*: A separate bug (not a split-off subtask) created to handle the data recovery and stock correction for the duplicate order. As noted in ATC-43, \"Stock correction stays on ATC-46\" rather than being part of the split follow-ups.",
+        "abstained": false,
+        "retrievalRounds": 4,
+        "queriesUsed": [
+          "ATC-43 follow up fix issues created"
+        ],
+        "citations": [
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-44",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-44",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-45",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-46",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-47",
+            "type": "issue"
+          }
+        ],
+        "elapsed": 116.3,
+        "question": "Which follow-up issues were created to fix it?",
+        "turn": 3
+      },
+      {
+        "answer": "\n\nBased on the information retrieved:\n\n**Verification status:**\n- **ATC-45 (browser mitigation)** is confirmed as **\"live in beta\"** and verified working \u2014 comments on ATC-43 state \"No new duplicate orders have been reported since the fix\" (ATC-43).\n- **ATC-44 (API idempotency fix)** is noted as still owning the permanent fix, with ATC-43 carrying forward into the active sprint until all fixes are complete (ATC-43).\n\n**Build information:**\nThe original bug was reproduced in **`beta-1.0.0`** (ATC-43). However, the search results do not specify which exact build number contained or verified the fixes. The knowledge base confirms ATC-45 is \"live in beta\" but does not provide a specific build version for the fix verification.\n\n**Current status:**\nATC-43 remains open and is being carried into the active sprint, with the note that \"we are not closing it until stock recovery and the browser regression are complete\" (ATC-43). This suggests full verification of all fixes (including ATC-44 and ATC-47) is still pending.",
+        "abstained": false,
+        "retrievalRounds": 4,
+        "queriesUsed": [
+          "fix verified build ATC-43 ATC-44 ATC-45",
+          "verified build beta ATC-43 ATC-44 ATC-45 checkout fix",
+          "\"beta-1.0.1\" verified ATC-43 OR ATC-44 OR ATC-45",
+          "\"verified\" \"build\" ATC-43 OR ATC-44 OR ATC-45 checkout"
+        ],
+        "citations": [
+          {
+            "key": "ATC-45",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-47",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-4",
+            "type": "comment"
+          }
+        ],
+        "elapsed": 61.6,
+        "question": "Was the fix verified, and in which build?",
+        "turn": 4
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "facet": "sprint-goal-semantic",
+    "turns": [
+      {
+        "answer": "\n\n**AtlasCart Sprint 7** was focused on making the storefront accessible and observable. Its goal is: \"Prove the storefront is accessible, observable, and ready for a larger public beta.\"",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 12.4,
+        "question": "Which sprint was focused on making the storefront accessible and observable?",
+        "turn": 1
+      },
+      {
+        "answer": "\n\nAtlasCart Sprint 7's current status is **active**.",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 17.5,
+        "question": "What is that sprint's current status?",
+        "turn": 2
+      },
+      {
+        "answer": "\n\nThere are **8** issues in AtlasCart Sprint 7 (2 stories, 3 tasks, and 3 subtasks).",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 8.4,
+        "question": "How many issues are in it?",
+        "turn": 3
+      },
+      {
+        "answer": "\n\nYes, AtlasCart Sprint 7 is the most recent sprint (it started on July 13, 2026, and is currently active).",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 13.9,
+        "question": "Is it the most recent sprint?",
+        "turn": 4
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "facet": "history-reopened",
+    "turns": [
+      {
+        "answer": "\n\nTwo issues were reopened after being marked done:\n\n1. **ATC-68** \u2014 Reopened by **Daniel Park** on 2026-07-02 (status changed from *done* to *in_progress*). The reason noted was that the resent-email check failed.\n2. **ATC-30** \u2014 Reopened by **Noah Kim** on 2026-05-14 (status changed from *done* to *in_progress*).",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 18.1,
+        "question": "Which issues were reopened after being marked done, and who reopened them?",
+        "turn": 1
+      },
+      {
+        "answer": "\n\nATC-68 was reopened because the **resent-email check failed**. Daniel Park reopened it on 2026-07-02 after this failure was detected.",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 12.0,
+        "question": "Why was ATC-68 reopened?",
+        "turn": 2
+      },
+      {
+        "answer": "\n\nATC-30 was reopened because **a beta incident showed that one browser action can submit twice**. The story was not considered complete until the API handled a repeated request safely.\n\nThis was noted by Daniel Park in a comment on 2026-05-13, and Noah Kim reopened the issue from *done* to *in_progress* on 2026-05-14. The issue was subsequently closed again after the order endpoint was updated to use a checkout idempotency key before insert.",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [],
+        "citations": [
+          {
+            "key": "ATC-30",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-30",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-30",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-30",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-30",
+            "type": "comment"
+          }
+        ],
+        "elapsed": 49.7,
+        "question": "Why was ATC-30 reopened?",
+        "turn": 3
+      },
+      {
+        "answer": "\n\nYes, both issues are currently **done**.\n\n- **ATC-68** is in status *done* (last updated 2026-07-03).\n- **ATC-30** is in status *done* (last updated 2026-05-15).",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [
+          "ATC-68 ATC-30 status done in_progress"
+        ],
+        "citations": [],
+        "elapsed": 16.5,
+        "question": "Are both of those issues done now?",
+        "turn": 4
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "facet": "recency",
+    "turns": [
+      {
+        "answer": "\n\nThe single most recently updated issue is **ATC-79** \u2014 \"Run the public-beta release readiness review\" (a task in *in_progress* status, last updated at 2026-07-27T00:28:33Z).",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [
+          "most recently updated issue latest update"
+        ],
+        "citations": [],
+        "elapsed": 15.0,
+        "question": "What is the single most recently updated issue?",
+        "turn": 1
+      },
+      {
+        "answer": "\n\n**ATC-79** \u2014 \"Run the public-beta release readiness review\" is a task to create one clear go or no-go record covering features, incidents, speed, accessibility, security, rollback, and accepted risks. Every decision must link to a supporting result (e.g., a current test, dashboard, issue, or named risk owner). It's estimated at 3 points as a review and evidence-gathering task that runs after the related work finishes; fixing blockers or running load tests belong to their own existing issues. *(ATC-79)*",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [
+          "ATC-79"
+        ],
+        "citations": [
+          {
+            "key": "ATC-79",
+            "type": "issue"
+          }
+        ],
+        "elapsed": 16.8,
+        "question": "What is that issue about?",
+        "turn": 2
+      },
+      {
+        "answer": "\n\nATC-79 is in **AtlasCart Sprint 7** (the currently active sprint, running from 2026-07-13 to 2026-07-24).",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 17.2,
+        "question": "Which sprint is it in?",
+        "turn": 3
+      },
+      {
+        "answer": "\n\nATC-79 is currently **in_progress**.",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [
+          "ATC-79 status"
+        ],
+        "citations": [],
+        "elapsed": 30.9,
+        "question": "What is its current status?",
+        "turn": 4
+      }
+    ]
+  },
+  {
+    "id": 5,
+    "facet": "count-filter",
+    "turns": [
+      {
+        "answer": "\n\nThere are **11** bugs in total, and all 11 have a status of \"done\". That means **0** bugs are still open.",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 15.5,
+        "question": "How many bugs are there, and how many of them are still open (not done)?",
+        "turn": 1
+      },
+      {
+        "answer": "\n\nHere are the 11 bug issue keys:\n\n- ATC-76\n- ATC-68\n- ATC-59\n- ATC-43\n- ATC-46\n- ATC-39\n- ATC-37\n- ATC-48\n- ATC-21\n- ATC-20\n- ATC-19",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 9.9,
+        "question": "List the bug issue keys.",
+        "turn": 2
+      },
+      {
+        "answer": "\n\n**ATC-43** \u2014 \"Checkout can create two orders from a double click\"",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 12.2,
+        "question": "Which of those bugs was about checkout creating two orders?",
+        "turn": 3
+      },
+      {
+        "answer": "\n\nThere were **2** bugs in Sprint 6: ATC-76 and ATC-68.",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 31.3,
+        "question": "How many bugs were in Sprint 6?",
+        "turn": 4
+      }
+    ]
+  },
+  {
+    "id": 6,
+    "facet": "count-total",
+    "turns": [
+      {
+        "answer": "\n\nThere are **83** issues in total in this workspace.",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 7.2,
+        "question": "How many issues are there in total in this workspace?",
+        "turn": 1
+      },
+      {
+        "answer": "\n\nThere are **73** issues with a status of \"done\" in this workspace.",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 6.7,
+        "question": "How many of them are done?",
+        "turn": 2
+      },
+      {
+        "answer": "\n\nThere are **7** issues currently in progress.",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 6.3,
+        "question": "How many are still in progress?",
+        "turn": 3
+      },
+      {
+        "answer": "\n\nThere are **10** epics in total (8 done, 2 in progress).",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 6.7,
+        "question": "How many epics are there?",
+        "turn": 4
+      }
+    ]
+  },
+  {
+    "id": 7,
+    "facet": "sprint-velocity",
+    "turns": [
+      {
+        "answer": "\n\nIn the last completed sprint (**AtlasCart Sprint 6**, which ran from June 29 to July 10, 2026), you completed **37 story points** (out of 42 total / 39 committed).\n\nThe sprint's goal was: **\"Let sellers maintain a searchable catalog with an auditable import workflow.\"**",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 14.6,
+        "question": "How many story points did we complete in the last completed sprint, and what was that sprint's goal?",
+        "turn": 1
+      },
+      {
+        "answer": "\n\nThe sprint before that (**AtlasCart Sprint 5**, June 15\u201326, 2026) completed **35 story points** (out of 38 total / 32 committed). Its goal was: *\"Give shoppers and operations a safe order lifecycle from shipping choice through refund.\"*\n\n**Comparison:** Sprint 6 completed **2 more points** than Sprint 5 (37 vs. 35), a slight increase in throughput.",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [
+          "Sprint 5 goal completed points"
+        ],
+        "citations": [],
+        "elapsed": 41.7,
+        "question": "How does that compare to the sprint before it?",
+        "turn": 2
+      },
+      {
+        "answer": "\n\n**AtlasCart Sprint 2** had the highest completed points with **48 story points** (out of 66 total). It ran from May 4\u201315, 2026, with the goal: *\"Let an invited shopper place a test order and let operations see what happened.\"*\n\nFor reference, here are all completed sprints by points completed:\n| Sprint | Completed Points |\n|--------|-----------------|\n| Sprint 2 | **48** |\n| Sprint 1 | 42 |\n| Sprint 6 | 37 |\n| Sprint 5 | 35 |\n| Sprint 4 | 30 |\n| Sprint 3 | 29 |",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 27.5,
+        "question": "Which sprint had the highest completed points?",
+        "turn": 3
+      },
+      {
+        "answer": "\n\nThe goal of **AtlasCart Sprint 2** (the highest-completion sprint with 48 points) was:\n\n> **\"Let an invited shopper place a test order and let operations see what happened.\"**",
+        "abstained": false,
+        "retrievalRounds": 3,
+        "queriesUsed": [
+          "Sprint 2 goal",
+          "AtlasCart Sprint 2 goal"
+        ],
+        "citations": [],
+        "elapsed": 36.9,
+        "question": "What was the goal of that highest one?",
+        "turn": 4
+      }
+    ]
+  },
+  {
+    "id": 8,
+    "facet": "disambiguation-blocked",
+    "turns": [
+      {
+        "answer": "\n\nBased on the current workspace data:\n\n* There is exactly **1 issue** in a `blocked` status overall: **ATC-77** (\"Cache the public product catalog safely\") (ATC-77). Its description focuses on caching public catalog reads and does not explicitly state it blocks checkout or payments.\n* For **checkout** specifically, **ATC-33** explicitly notes that it blocks ATC-34 because the beta release requires request IDs in checkout failures so support can investigate invitations (ATC-33).\n* **Payment/refund** issues such as ATC-65 (\"Cancel an order before fulfillment\") and ATC-66 (\"Refund a cancelled beta order\") show verification results as `PASS` and are not currently blocking (ATC-65, ATC-66).",
+        "abstained": false,
+        "retrievalRounds": 4,
+        "queriesUsed": [
+          "blocking checkout payments blocked",
+          "checkout payments payment processing"
+        ],
+        "citations": [
+          {
+            "key": "ATC-65",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-65",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-65",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-66",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-66",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-33",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-77",
+            "type": "issue"
+          }
+        ],
+        "elapsed": 93.1,
+        "question": "What is currently blocking checkout or payments?",
+        "turn": 1
+      },
+      {
+        "answer": "\n\nYes, there is exactly **1 blocked issue**:\n\n* **ATC-77** \u2014 \"Cache the public product catalog safely\" (story, in AtlasCart Sprint 7)",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [
+          "status blocked issues"
+        ],
+        "citations": [],
+        "elapsed": 13.5,
+        "question": "Is there any blocked issue at all?",
+        "turn": 2
+      },
+      {
+        "answer": "\n\n**ATC-77** \u2014 \"Cache the public product catalog safely\" is about reducing repeated catalog reads for the public beta without serving inactive products or hiding a seller update for too long.\n\nKey details:\n- **Goal**: Implement read-through caching with proper invalidation so repeated public catalog requests meet the cache-hit latency target under load.\n- **Scope** (5 story points): Combines cache keys, invalidation, fallback, load tests, and observability. Personalized catalog responses and multi-region cache replication are explicitly excluded.\n- **Current status**: Blocked (moved to blocked by Maya Chen on 2026-07-25). The team's last work update noted that read-through caching is working for list and detail routes, but they are still testing invalidation during a large import. A focused subtask **ATC-81** was created to exercise the cache invalidation path during imports.",
+        "abstained": false,
+        "retrievalRounds": 3,
+        "queriesUsed": [
+          "ATC-77"
+        ],
+        "citations": [
+          {
+            "key": "ATC-77",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-77",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-77",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-81",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-81",
+            "type": "issue"
+          }
+        ],
+        "elapsed": 30.8,
+        "question": "What is that blocked issue about?",
+        "turn": 3
+      },
+      {
+        "answer": "There is no information about this in the knowledge base.",
+        "abstained": true,
+        "retrievalRounds": 2,
+        "queriesUsed": [
+          "ATC-77 checkout"
+        ],
+        "citations": [],
+        "elapsed": 28.4,
+        "question": "Is it related to checkout?",
+        "turn": 4
+      }
+    ]
+  },
+  {
+    "id": 9,
+    "facet": "false-link",
+    "turns": [
+      {
+        "answer": "There is no information about this in the knowledge base.",
+        "abstained": true,
+        "retrievalRounds": 4,
+        "queriesUsed": [
+          "ATC-43 ATC-59 block blocking",
+          "ATC-59 blocked by ATC-43",
+          "ATC-59"
+        ],
+        "citations": [],
+        "elapsed": 90.1,
+        "question": "Does ATC-43 block ATC-59?",
+        "turn": 1
+      },
+      {
+        "answer": "\n\nATC-59 is a bug titled **\"Cart merge doubles a matching SKU\"** (ATC-59).\n\n**Context:** A shopper with two mugs in their account cart and one mug in a guest cart sees six mugs after signing in, because the merge callback runs twice.\n\n**Bug details:**\n- **Environment:** Private beta, Chrome 127, account cart quantity 2 and guest cart quantity 1 for SKU F-612.\n- **Steps to reproduce:** Add one mug as a guest, sign into an account that already has two mugs, then refresh the callback route.\n- **Expected behavior:** The merged cart contains three mugs once.\n- **Actual behavior:** The first callback shows three, but the retry doubles the account quantity to six.\n\n**Acceptance criteria (AC1):** The example carts merge to quantity three, not six, when stock is available.\n\n**Fix:** The callback now stores and returns the first merge result before clearing the guest token, so repeated callbacks no longer recalculate quantities. The fix preserves idempotency under callback retry and verifies multiple overlap patterns, with no schema migration required.",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [
+          "ATC-59"
+        ],
+        "citations": [
+          {
+            "key": "ATC-59",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-59",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-59",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-59",
+            "type": "comment"
+          }
+        ],
+        "elapsed": 27.8,
+        "question": "What is ATC-59 about?",
+        "turn": 2
+      },
+      {
+        "answer": "There is no information about this in the knowledge base.",
+        "abstained": true,
+        "retrievalRounds": 2,
+        "queriesUsed": [
+          "ATC-43 ATC-59",
+          "ATC-43"
+        ],
+        "citations": [],
+        "elapsed": 85.7,
+        "question": "Are ATC-43 and ATC-59 related at all?",
+        "turn": 3
+      },
+      {
+        "answer": "There is no information about this in the knowledge base.",
+        "abstained": true,
+        "retrievalRounds": 4,
+        "queriesUsed": [
+          "ATC-59 epic",
+          "ATC-59 parent epic cart merge"
+        ],
+        "citations": [],
+        "elapsed": 60.4,
+        "question": "Which epic does ATC-59 belong to?",
+        "turn": 4
+      }
+    ]
+  },
+  {
+    "id": 10,
+    "facet": "abstention",
+    "turns": [
+      {
+        "answer": "There is no information about this in the knowledge base.",
+        "abstained": true,
+        "retrievalRounds": 3,
+        "queriesUsed": [
+          "AWS bill last month June 2026",
+          "AWS billing cost invoice cloud infrastructure",
+          "AWS bill cost charges June 2026 invoice cloud spending"
+        ],
+        "citations": [],
+        "elapsed": 20.4,
+        "question": "What was our AWS bill last month?",
+        "turn": 1
+      },
+      {
+        "answer": "There is no information about this in the knowledge base.",
+        "abstained": true,
+        "retrievalRounds": 2,
+        "queriesUsed": [
+          "monthly server costs AWS bill infrastructure expenses",
+          "server costs expenses billing budget infrastructure spend"
+        ],
+        "citations": [],
+        "elapsed": 16.0,
+        "question": "What about our monthly server costs?",
+        "turn": 2
+      },
+      {
+        "answer": "There is no information about this in the knowledge base.",
+        "abstained": true,
+        "retrievalRounds": 3,
+        "queriesUsed": [
+          "budget spend costs AWS bill server costs",
+          "budget financial spending cost infrastructure cloud hosting",
+          "AWS bill monthly cost infrastructure spending budget tracking"
+        ],
+        "citations": [],
+        "elapsed": 23.2,
+        "question": "Is there any budget or spend data in this workspace?",
+        "turn": 3
+      },
+      {
+        "answer": "There is no information about this in the knowledge base.",
+        "abstained": true,
+        "retrievalRounds": 2,
+        "queriesUsed": [
+          "cost budget spend AWS bill server expenses financial",
+          "AWS bill monthly cost infrastructure spend budget expense"
+        ],
+        "citations": [],
+        "elapsed": 19.1,
+        "question": "So this system has no cost information at all?",
+        "turn": 4
+      }
+    ]
+  },
+  {
+    "id": 11,
+    "facet": "multi-turn-followup",
+    "turns": [
+      {
+        "answer": "\n\nThe latest sprint is **AtlasCart Sprint 7**, which is currently active (started July 13, 2026; ends July 24, 2026). Its goal is: *\"Prove the storefront is accessible, observable, and ready for a larger public beta.\"*",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 19.4,
+        "question": "What is the latest sprint?",
+        "turn": 1
+      },
+      {
+        "answer": "\n\nYes, the latest sprint (**AtlasCart Sprint 7**) has a goal: *\"Prove the storefront is accessible, observable, and ready for a larger public beta.\"*",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [
+          "latest sprint goal"
+        ],
+        "citations": [],
+        "elapsed": 46.1,
+        "question": "Does it have a goal?",
+        "turn": 2
+      },
+      {
+        "answer": "\n\n**AtlasCart Sprint 7** ends on **July 24, 2026**.",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [
+          "latest sprint end date"
+        ],
+        "citations": [],
+        "elapsed": 25.5,
+        "question": "When does it end?",
+        "turn": 3
+      },
+      {
+        "answer": "\n\nNo, **AtlasCart Sprint 7** is not completed yet \u2014 its current status is **active**. It ended on July 24, 2026, but has not been marked as completed.",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [
+          "AtlasCart Sprint 7 status completed closed done"
+        ],
+        "citations": [],
+        "elapsed": 28.5,
+        "question": "Is it completed yet?",
+        "turn": 4
+      }
+    ]
+  },
+  {
+    "id": 12,
+    "facet": "lexical-exact-key",
+    "turns": [
+      {
+        "answer": "\n\nHere are the details for **ATC-43**:\n\n**Title:** Checkout can create two orders from a double click\n\n**Description:**\nDuring the private beta, a slow checkout allowed two Place order clicks. Two order records were created and stock was reduced twice. Only one sandbox payment succeeded. We need a safe mitigation and follow-up fixes.\n\n**Bug report:**\n- **When / environment:** Private-beta build beta-1.0.0 in Chrome with Slow 3G and one Desk Lamp in the cart.\n- **Steps to reproduce:** Use the accepted sandbox card and click Place order twice before the pending state appears.\n- **Expected behavior:** One checkout attempt returns one order, captures one sandbox payment, and reduces stock once.\n- **Actual behavior:** Orders BETA-1042 and BETA-1043 are inserted and stock falls by two, although only one payment is captured.\n\n**Subtasks:**\n- **ATC-44** \u2014 Reject repeated checkout requests (permanent fix: API idempotency check before order insert)\n- **ATC-45** \u2014 Disable Place order while checkout is pending (browser repeat-click mitigation)\n- **ATC-47** \u2014 Cover slow checkout in regression tests (automated exit criteria tied to the checkout test plan)\n\n**Acceptance criteria:**\n- AC1 \u2014 The report records one intended checkout, the two resulting orders, the stock impact, and the payment outcome.\n- AC2 \u2014 Frontend mitigation and API idempotency stop a repeat action from creating another order.\n- AC3 \u2014 The incident remains open until stock recovery and slow-browser regression work are complete.\n\n**Estimate:** 5 \u2014 Investigation crosses browser behavior, gateway logs, order inserts, payment outcome, and stock impact. Mitigation and permanent fixes are split into subtasks, but coordination, customer communication, and exit verification remain on the incident.",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [
+          "ATC-43"
+        ],
+        "citations": [
+          {
+            "key": "ATC-43",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          }
+        ],
+        "elapsed": 58.1,
+        "question": "Show me the details of ATC-43.",
+        "turn": 1
+      },
+      {
+        "answer": "\n\nBased on the current metadata for **ATC-43**:\n\n* **Issue Type:** Bug\n* **Status:** Done",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [
+          "ATC-43 issue type status"
+        ],
+        "citations": [
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          }
+        ],
+        "elapsed": 12.3,
+        "question": "What type of issue is it and what is its status?",
+        "turn": 2
+      },
+      {
+        "answer": "\n\n**ATC-43** was in **AtlasCart Sprint 3**.",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 16.4,
+        "question": "Which sprint was it in?",
+        "turn": 3
+      },
+      {
+        "answer": "There is no information about this in the knowledge base.",
+        "abstained": true,
+        "retrievalRounds": 4,
+        "queriesUsed": [
+          "ATC-43 epic",
+          "ATC-43 parent epic",
+          "epic checkout double click order"
+        ],
+        "citations": [],
+        "elapsed": 98.0,
+        "question": "Which epic does it belong to?",
+        "turn": 4
+      }
+    ]
+  },
+  {
+    "id": 13,
+    "facet": "all-sprints-breadth",
+    "turns": [
+      {
+        "answer": "\n\nHere are all 7 sprints and their current statuses:\n\n| Sprint | Status | Dates |\n|--------|--------|-------|\n| AtlasCart Sprint 7 | **active** | 2026-07-13 \u2013 2026-07-24 |\n| AtlasCart Sprint 6 | completed | 2026-06-29 \u2013 2026-07-10 |\n| AtlasCart Sprint 5 | completed | 2026-06-15 \u2013 2026-06-26 |\n| AtlasCart Sprint 4 | completed | 2026-06-01 \u2013 2026-06-12 |\n| AtlasCart Sprint 3 | completed | 2026-05-18 \u2013 2026-05-29 |\n| AtlasCart Sprint 2 | completed | 2026-05-04 \u2013 2026-05-15 |\n| AtlasCart Sprint 1 | completed | 2026-04-20 \u2013 2026-05-01 |\n\n**Summary:** 1 active sprint (Sprint 7) and 6 completed sprints.",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 20.8,
+        "question": "List all the sprints with their status.",
+        "turn": 1
+      },
+      {
+        "answer": "There is no information about this in the knowledge base.",
+        "abstained": true,
+        "retrievalRounds": 0,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 20.5,
+        "question": "Which ones are already completed?",
+        "turn": 2
+      },
+      {
+        "answer": "\n\nThere are **7 sprints** in total (6 completed and 1 currently active).",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 28.9,
+        "question": "How many sprints are there in total?",
+        "turn": 3
+      },
+      {
+        "answer": "\n\nThe goal of **AtlasCart Sprint 1** was:\n\n> *\"Load a small seller catalog and let a shopper browse product details in staging.\"*",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [
+          "Sprint 1 goal"
+        ],
+        "citations": [],
+        "elapsed": 16.5,
+        "question": "What is the goal of Sprint 1?",
+        "turn": 4
+      }
+    ]
+  },
+  {
+    "id": 14,
+    "facet": "multi-hop-single-issue",
+    "turns": [
+      {
+        "answer": "\n\nHere is a summary of the double-order checkout bug:\n\n## What it was (ATC-43)\nDuring the private beta, a slow checkout page allowed shoppers to click \"Place order\" twice before the pending state appeared. Both requests reached the API and returned 201, creating two order records (e.g., BETA-1042 and BETA-1043) and reducing stock by two. Only one sandbox payment was captured. The root cause was that the API created the order *before* checking whether this checkout request had already been handled \u2014 there was no idempotency protection. The issue was reproduced in Chrome with Slow 3G enabled (ATC-43).\n\n## How it was fixed\nThe fix was split across four follow-up issues:\n\n- **ATC-45** (frontend mitigation): Disabled the \"Place order\" button as soon as submission starts, preventing repeat clicks in the browser. This shipped first to reduce customer exposure.\n- **ATC-44** (permanent fix): Added an API idempotency check that returns the first order result for a repeated request key, preventing duplicate orders at the server level.\n- **ATC-46** (stock recovery): Restored stock that was incorrectly deducted by the duplicate beta order.\n- **ATC-47** (regression testing): Added automated slow-checkout regression tests tied to the checkout test plan, ensuring repeatable exit criteria.\n\n## Current status\nAll five issues (ATC-43, ATC-44, ATC-45, ATC-46, ATC-47) are **done**. The incident was closed in AtlasCart Sprint 3 after idempotency, pending-button mitigation, stock recovery design, and slow-browser regression all reached verified owners. No duplicate beta orders were reported after the fix was deployed in beta-1.0.2 (ATC-43).",
+        "abstained": false,
+        "retrievalRounds": 5,
+        "queriesUsed": [],
+        "citations": [
+          {
+            "key": "ATC-43",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          }
+        ],
+        "elapsed": 117.5,
+        "question": "Summarize the double-order checkout bug: what it was, how it was fixed, and its current status.",
+        "turn": 1
+      },
+      {
+        "answer": "\n\nBased on the issue details:\n\n**Temporary mitigation (ATC-45)** \u2014 Disabled the \"Place order\" button in the browser as soon as submission starts, keeping it disabled until the request succeeds or fails. This prevented repeat clicks from sending a second request but was explicitly noted as not replacing the API fix (\"This reduces repeat clicks but does not replace the API fix\").\n\n**Permanent fix (ATC-44)** \u2014 Added an API idempotency check that sends a request key with checkout and returns the first result when the same key is submitted again. The check happens *before* a second order insert, preventing duplicate orders at the server level regardless of browser behavior.",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [
+          "ATC-44 ATC-45 permanent fix temporary mitigation double order checkout"
+        ],
+        "citations": [
+          {
+            "key": "ATC-44",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-45",
+            "type": "issue"
+          }
+        ],
+        "elapsed": 26.6,
+        "question": "What was the permanent fix versus the temporary mitigation?",
+        "turn": 2
+      },
+      {
+        "answer": "\n\nBased on the retrieved information, there is **no explicit record of customer complaints** about the double-order bug in the knowledge base. The issue was identified through **internal reproduction** during testing:\n\nFrom ATC-43's description, the bug was reproduced by the team using \"Chrome with Slow 3G and one Desk Lamp in the cart\" \u2014 clicking Place order twice before the pending state appeared. This created two test orders (BETA-1042 and BETA-1043) in the beta environment.\n\nHowever, there was **real operational impact** that required remediation:\n- Stock was incorrectly reduced by two units for the affected order(s)\n- ATC-46 was created specifically to restore stock that was \"incorrectly deducted by the duplicate beta order,\" implying at least one real customer's order triggered this bug in production\n\nThe knowledge base does not contain any records of beta shoppers directly reporting or complaining about receiving duplicate orders. The bug was caught and fixed proactively before widespread customer impact occurred \u2014 no duplicate beta orders were reported after the fix shipped in beta-1.0.2 (ATC-43).",
+        "abstained": false,
+        "retrievalRounds": 4,
+        "queriesUsed": [
+          "customer impact duplicate orders double order checkout bug reports complaints",
+          "ATC-43 customer impact beta shoppers duplicate order reported",
+          "ATC-43 customer reported duplicate order complaint beta shopper feedback"
+        ],
+        "citations": [
+          {
+            "key": "ATC-43",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-46",
+            "type": "comment"
+          }
+        ],
+        "elapsed": 65.8,
+        "question": "Was there any customer impact?",
+        "turn": 3
+      },
+      {
+        "answer": "\n\nYou're correct \u2014 let me fix this. Looking at ATC-43's own description, it explicitly lists only **three subtasks**:\n- ATC-44 \u2014 Reject repeated checkout requests\n- ATC-45 \u2014 Disable Place order while checkout is pending  \n- ATC-47 \u2014 Cover slow checkout in regression tests\n\n**ATC-46 is a separate, related bug issue**, not a subtask of ATC-43. It was created independently to handle stock recovery (the comment on ATC-43 notes \"Stock correction stays on ATC-46\").\n\n**Corrected answer:**\n\nYes, the bug is fully resolved. All related issues are in **done** status:\n\n- **ATC-43** (the original incident bug) \u2014 done\n- **ATC-44**, **ATC-45**, **ATC-47** (the three subtasks of ATC-43) \u2014 all done\n- **ATC-46** (a separate, related bug for stock recovery) \u2014 done\n\nThe incident was closed in AtlasCart Sprint 3 after all follow-up work completed. No duplicate beta orders were reported after the fix shipped in beta-1.0.2, and automated regression tests for slow checkout were added to prevent recurrence (ATC-43).",
+        "abstained": false,
+        "retrievalRounds": 4,
+        "queriesUsed": [
+          "double-order checkout bug resolved status ATC-43 ATC-44 ATC-45 ATC-46 ATC-47"
+        ],
+        "citations": [
+          {
+            "key": "ATC-43",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-46",
+            "type": "issue"
+          }
+        ],
+        "elapsed": 87.3,
+        "question": "Is the bug fully resolved now?",
+        "turn": 4
+      }
+    ]
+  },
+  {
+    "id": 15,
+    "facet": "comment-aggregation",
+    "turns": [
+      {
+        "answer": "\n\nBased on the comments for **ATC-43** (the duplicate-order incident), people raised the following concerns and findings:\n\n**Reproduction & Impact:**\n- The issue was reproduced in Chrome with Slow 3G: clicking \"Place order\" twice before the spinner appeared created two orders and reduced stock by two (ATC-43).\n- A real beta shopper reported wanting one desk lamp but seeing two order records in the operations page\u2014**BETA-1042 and BETA-1043**\u2014with matching time and amount. These are the actual duplicated order IDs from the beta system, not separate Jira issues or subtasks (ATC-43).\n\n**Root Cause Findings:**\n- Both requests reached the API and returned 201; there was no proxy retry in the request logs (ATC-43).\n- The gateway/API evidence confirmed two distinct request IDs arrived with `retry_count=0`, ruling out a proxy retry (ATC-43).\n- The root cause was identified: the system creates the order *before* checking whether that checkout request was already handled (ATC-43).\n\n**Payment Concern:**\n- Only one sandbox payment was captured despite two orders being created. The beta shopper was informed that the duplicate record was found and no second charge occurred (ATC-43).\n\n**Mitigation & Follow-up Concerns:**\n- The team split the follow-up work into three official subtasks of ATC-43: **ATC-44** (API idempotency fix), **ATC-45** (browser button disable mitigation), and **ATC-47** (slow-response regression tests) (ATC-43).\n- **ATC-46** was noted as a separate, related issue handling the stock correction; it is explicitly kept apart from the split-off subtasks (ATC-43).\n- The immediate browser fix (ATC-45) went live in beta, disabling \"Place order\" as soon as submission starts to reduce repeat clicks (ATC-43).\n- The permanent API fix (ATC-44) now returns the first order result for a repeated key (ATC-43).\n- The team expressed concern about not closing the incident until stock recovery (handled separately on ATC-46) and the browser regression work (ATC-47) were complete, carrying it into the active sprint (ATC-43).\n\n**Resolution:**\n- No new duplicate orders were reported after the fixes landed. The incident was closed in Sprint 3 after idempotency, pending-button mitigation, stock recovery design, and slow-browser regression all reached verified owners (ATC-43).",
+        "abstained": false,
+        "retrievalRounds": 5,
+        "queriesUsed": [
+          "duplicate order problem concerns findings comments",
+          "duplicate order ATC-43 repeat clicks place order"
+        ],
+        "citations": [
+          {
+            "key": "ATC-43",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-47",
+            "type": "comment"
+          }
+        ],
+        "elapsed": 214.5,
+        "question": "What concerns or findings did people raise in the comments about the duplicate-order problem?",
+        "turn": 1
+      },
+      {
+        "answer": "\n\n**Yes, stock was affected.** The duplicate order reduced Desk Lamp stock twice\u2014leaving it one unit lower than the single captured payment justified (ATC-46).\n\n**How it was corrected:**\n\n1. **Immediate workaround:** Someone manually corrected the beta fixture stock via a direct database update (ATC-46). However, this raised a concern: only an engineer could edit PostgreSQL directly, leaving no support-readable correction record (ATC-46).\n\n2. **Audited workflow requirement:** A request was made to include the order reference and reason in any correction record, so support could explain who changed stock (ATC-46). Engineering and support then completed a correction workflow review, documenting the required fields, permission boundary, retry rule, audit table, and exclusions in an attached requirement document (ATC-46).\n\n3. **Sprint 3 completion:** Operations completed a correction through the new audited workflow and confirmed that the order reference, reason, actor, and stock delta are all understandable without requiring a direct database edit (ATC-46).",
+        "abstained": false,
+        "retrievalRounds": 3,
+        "queriesUsed": [
+          "stock correction ATC-46 duplicate order"
+        ],
+        "citations": [
+          {
+            "key": "ATC-46",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-46",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-46",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-46",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-46",
+            "type": "comment"
+          }
+        ],
+        "elapsed": 38.9,
+        "question": "Was stock affected, and how was it corrected?",
+        "turn": 2
+      },
+      {
+        "answer": "\n\nYou're right to flag that distinction. Here is the corrected answer:\n\nThe team **did not consider it fully closed** until all follow-up work was complete. They explicitly kept the incident open through several stages:\n\n1. **After the API fix (ATC-44) landed:** They kept it open until Daniel finished the browser regression work on ATC-47 (ATC-43).\n\n2. **Carrying into the active sprint:** They stated they were \"not closing it until stock recovery and the browser regression are complete\" (ATC-43).\n\n3. **After API checks passed:** They noted the full browser regression was still in progress under ATC-47, and support still needed the stock correction on **ATC-46** before it was \"fully recoverable\" (ATC-43).\n\n**Important distinction:** ATC-46 is a **separate, related bug** for stock correction\u2014not one of the official split-off subtasks. The team explicitly split follow-up work into three subtasks (ATC-44, ATC-45, and ATC-47) while keeping stock correction on the separate issue ATC-46 (ATC-43).\n\n**Final closure:** The incident was ultimately closed in Sprint 3 after the three official subtasks (idempotency ATC-44, pending-button mitigation ATC-45, and slow-browser regression ATC-47) reached verified owners **and** the separate stock correction bug (ATC-46) was also resolved. No duplicate beta orders were reported after the release, and they confirmed closure (ATC-43).\n\nSo while there were open concerns throughout the process, they resolved all of them\u2014both the split-off subtasks and the separate related bug\u2014before closing.",
+        "abstained": false,
+        "retrievalRounds": 5,
+        "queriesUsed": [
+          "ATC-43 closed open concerns",
+          "ATC-43 not closed until stock recovery regression concerns",
+          "ATC-43 closed Sprint 3 verified complete remaining concerns"
+        ],
+        "citations": [
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-46",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-46",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-45",
+            "type": "issue"
+          }
+        ],
+        "elapsed": 141.0,
+        "question": "Did the team consider it fully closed, or were there open concerns?",
+        "turn": 3
+      },
+      {
+        "answer": "\n\nThe final resolution for **ATC-43** was closed in Sprint 3 after the three official split-off subtasks reached verified owners:\n- **ATC-44** \u2013 The permanent API idempotency fix.\n- **ATC-45** \u2013 The browser-side pending-button mitigation.\n- **ATC-47** \u2013 The slow-browser regression exit-criteria tests.\n\nThe stock correction work was handled separately on **ATC-46**, which is a distinct bug issue (not one of the split-off subtasks). It was resolved via an audited correction workflow. No duplicate beta orders were reported after the beta-1.0.2 release, confirming all fixes held (ATC-43).",
+        "abstained": false,
+        "retrievalRounds": 3,
+        "queriesUsed": [
+          "ATC-43 closed resolution final",
+          "ATC-43 closed Sprint 3 verified no duplicate orders"
+        ],
+        "citations": [
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-43",
+            "type": "comment"
+          }
+        ],
+        "elapsed": 166.6,
+        "question": "What was the final resolution?",
+        "turn": 4
+      }
+    ]
+  },
+  {
+    "id": 16,
+    "facet": "sprint-membership",
+    "turns": [
+      {
+        "answer": "\n\nThere are **8 issues** in the active sprint (AtlasCart Sprint 7):\n\n- 2 stories\n- 3 tasks  \n- 3 subtasks\n\nBy status: 5 in progress, 1 planned, 1 blocked, and 1 done.",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 17.1,
+        "question": "How many issues are in the active sprint?",
+        "turn": 1
+      },
+      {
+        "answer": "\n\nYou're right \u2014 the flat table presentation could misleadingly imply all 8 issues are equivalent items. Let me clarify the actual structure:\n\n**Stories (2):**\n- ATC-77 \u2014 *Cache the public product catalog safely* (Blocked)\n- ATC-72 \u2014 *Index products for catalog search* (Done)\n\n**Tasks (3):**\n- ATC-79 \u2014 *Run the public-beta release readiness review* (In Progress)\n- ATC-80 \u2014 *Load-test catalog through checkout* (In Progress)\n- ATC-78 \u2014 *Complete the public-beta accessibility pass* (In Progress)\n\n**Subtasks (3):**\n- ATC-81 \u2014 *Exercise catalog cache invalidation during import* (In Progress)\n- ATC-82 \u2014 *Fix checkout focus after validation errors* (In Progress)\n- ATC-83 \u2014 *Add a cold shipping-quote load scenario* (Planned)\n\nThe three subtasks (ATC-81, ATC-82, ATC-83) are subordinate items under their respective parent stories/tasks. The two stories (ATC-72, ATC-77) and three tasks (ATC-78, ATC-79, ATC-80) are separate top-level issues \u2014 not split-off equivalents of the subtasks.",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 70.9,
+        "question": "List those issues.",
+        "turn": 2
+      },
+      {
+        "answer": "\n\n**5 issues** are still in progress:\n\n- **3 tasks:** ATC-78, ATC-79, ATC-80\n- **2 subtasks:** ATC-81, ATC-82",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 81.4,
+        "question": "How many of them are still in progress?",
+        "turn": 3
+      },
+      {
+        "answer": "\n\nYou're right \u2014 I need to clarify the parent-child relationships among those 5 in-progress issues. Here's the corrected breakdown:\n\n**3 standalone tasks (no subtasks):**\n- ATC-78 \u2014 *Complete the public-beta accessibility pass* (In Progress)\n- ATC-79 \u2014 *Run the public-beta release readiness review* (In Progress)\n- ATC-80 \u2014 *Load-test catalog through checkout* (In Progress)\n\n**2 subtasks (belonging to other issues):**\n- ATC-81 \u2014 *Exercise catalog cache invalidation during import* (In Progress) \u2014 subtask of **ATC-77** (which is Blocked, not in progress)\n- ATC-82 \u2014 *Fix checkout focus after validation errors* (In Progress) \u2014 subtask of **ATC-78** (which is also In Progress)\n\nSo all 5 are in progress, but ATC-79 and ATC-80 are independent top-level tasks, while ATC-81 and ATC-82 are subtasks tied to their respective parents (ATC-77 and ATC-78).",
+        "abstained": false,
+        "retrievalRounds": 4,
+        "queriesUsed": [
+          "ATC-78 ATC-79 ATC-80 ATC-81 ATC-82 status blocked"
+        ],
+        "citations": [
+          {
+            "key": "ATC-78",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-79",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-80",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-81",
+            "type": "issue"
+          },
+          {
+            "key": "ATC-82",
+            "type": "issue"
+          }
+        ],
+        "elapsed": 92.1,
+        "question": "Are any of them blocked?",
+        "turn": 4
+      }
+    ]
+  },
+  {
+    "id": 17,
+    "facet": "issue-comments-fallback",
+    "turns": [
+      {
+        "answer": "\n\nTwo issues were reopened after being marked done:\n\n1. **ATC-68** \u2014 Reopened by **Daniel Park** on 2026-07-02. He reopened it after the resent-email check failed.\n2. **ATC-30** \u2014 Reopened by **Noah Kim** on 2026-05-14.",
+        "abstained": false,
+        "retrievalRounds": 1,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 17.3,
+        "question": "Which issues were reopened after being marked done, and who reopened them?",
+        "turn": 1
+      },
+      {
+        "answer": "\n\nHere are the reasons each issue was reopened:\n\n- **ATC-68**: Daniel Park reopened it because the resent-email check failed.\n- **ATC-30**: Noah Kim reopened it because a beta incident showed that one browser action could submit twice; the story was not complete until the API handled a repeated request safely.",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [],
+        "citations": [
+          {
+            "key": "ATC-30",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-30",
+            "type": "comment"
+          },
+          {
+            "key": "ATC-30",
+            "type": "comment"
+          }
+        ],
+        "elapsed": 35.5,
+        "question": "What is the reason people reopened those two issues?",
+        "turn": 2
+      },
+      {
+        "answer": "\n\nEach issue was finally completed in the following sprint:\n\n- **ATC-68** \u2014 Completed in **AtlasCart Sprint 6** (marked done on 2026-07-03).\n- **ATC-30** \u2014 Completed in **AtlasCart Sprint 2** (marked done on 2026-05-15).",
+        "abstained": false,
+        "retrievalRounds": 3,
+        "queriesUsed": [],
+        "citations": [],
+        "elapsed": 48.7,
+        "question": "Which sprint was each of them finally completed in?",
+        "turn": 3
+      },
+      {
+        "answer": "\n\nYes, both issues are currently in **done** status:\n\n- **ATC-68** \u2014 Status: done (last updated 2026-07-03)\n- **ATC-30** \u2014 Status: done (last updated 2026-05-15)",
+        "abstained": false,
+        "retrievalRounds": 2,
+        "queriesUsed": [
+          "ATC-68 ATC-30 status done completed"
+        ],
+        "citations": [],
+        "elapsed": 16.8,
+        "question": "Are both fully done now?",
+        "turn": 4
+      }
+    ]
+  }
+]
