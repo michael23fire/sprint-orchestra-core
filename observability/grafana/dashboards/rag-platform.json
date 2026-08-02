@@ -1,0 +1,137 @@
+{
+  "title": "Sprint Orchestra — RAG Platform",
+  "uid": "rag-platform",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Request rate (req/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total[1m])) by (job, path)",
+          "legendFormat": "{{job}} {{path}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "P95 request latency by service",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, job, path))",
+          "legendFormat": "{{job}} {{path}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "5xx error rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total{status=~\"5..\"}[1m])) by (job)",
+          "legendFormat": "{{job}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "vectorization-service: /search stage latency (P95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(search_embed_seconds_bucket[5m])) by (le))",
+          "legendFormat": "embed"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(search_retrieval_seconds_bucket[5m])) by (le, mode))",
+          "legendFormat": "retrieval ({{mode}})"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(search_rerank_seconds_bucket[5m])) by (le))",
+          "legendFormat": "rerank"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "ai-service: /ask stage latency (P95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(agent_llm_call_seconds_bucket[5m])) by (le))",
+          "legendFormat": "LLM call"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(agent_retrieval_call_seconds_bucket[5m])) by (le))",
+          "legendFormat": "retrieval tool call"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(agent_cache_lookup_seconds_bucket[5m])) by (le))",
+          "legendFormat": "cache lookup"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Semantic cache hit rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(rate(agent_cache_hits_total{hit_type=\"hit\"}[5m])) / sum(rate(agent_cache_hits_total[5m]))",
+          "legendFormat": "hit rate"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Avg corrective-retrieval rounds per /ask",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(agent_retrieval_rounds_sum[5m]) / rate(agent_retrieval_rounds_count[5m])",
+          "legendFormat": "avg rounds"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Cumulative estimated $ spent (since ai-service start)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "agent_cost_usd_total",
+          "legendFormat": "total $"
+        }
+      ],
+      "description": "Same number as GET /stats' total_cost_usd (app/stats.py) — pushed to Prometheus (app/observability.py::COST_USD_TOTAL) on every /ask so it can be graphed over time here, not just read as a snapshot."
+    }
+  ]
+}

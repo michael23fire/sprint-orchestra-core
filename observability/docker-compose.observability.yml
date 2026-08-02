@@ -1,0 +1,58 @@
+# Optional overlay — NOT part of the main docker-compose.yml on purpose, so a fresh `docker compose
+# up` doesn't silently start two extra containers nobody asked for. Run explicitly:
+#
+#   docker compose -f observability/docker-compose.observability.yml up -d
+#
+# Both vectorization-service and ai-service run directly via `uvicorn` on the host (see their own
+# READMEs), not inside this compose network — so Prometheus scrapes them via `host.docker.internal`,
+# Docker Desktop's built-in DNS name for the host machine (works out of the box on macOS/Windows; on
+# Linux add `extra_hosts: ["host.docker.internal:host-gateway"]` under `prometheus` below).
+version: '3.8'
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: poc-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: poc-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_SECURITY_ADMIN_PASSWORD: "admin"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+  # Trace-level observability — the third pillar alongside Prometheus (metrics, above) and structured
+  # logs (ai-service/app/logging_config.py): one LLM call's full input/output and, across a CragAgent
+  # tool loop, how successive calls chain together. ai-service (running on the host, same as it talks
+  # to Prometheus) sends OTLP spans to this container's :4317; browse traces at :6006. See
+  # ai-service/app/tracing.py for exactly which LLM client paths are instrumented.
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: poc-phoenix
+    ports:
+      - "6006:6006"  # UI + REST
+      - "4317:4317"  # OTLP gRPC collector
+    volumes:
+      - phoenix-data:/mnt/data
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  phoenix-data:
