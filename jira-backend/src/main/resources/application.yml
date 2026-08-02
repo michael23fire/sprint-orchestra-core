@@ -89,6 +89,11 @@ app:
     attachment-ingestion:
       enabled: ${APP_KAFKA_ATTACHMENT_INGESTION_ENABLED:false}
       topic: ${APP_KAFKA_ATTACHMENT_INGESTION_TOPIC:jira.attachment.ingestion}
+    # Publish after issue/comment create/update/delete (after DB commit). Consumed by the
+    # vectorization-service for RAG ingestion (chunk -> embed -> upsert into pgvector).
+    content-ingestion:
+      enabled: ${APP_KAFKA_CONTENT_INGESTION_ENABLED:false}
+      topic: ${APP_KAFKA_CONTENT_INGESTION_TOPIC:jira.content.ingestion}
 
   # GitHub OAuth. Set GITHUB_OAUTH_ENABLED=true and OAuth app credentials from GitHub Developer settings.
   oauth2:

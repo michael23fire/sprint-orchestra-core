@@ -4,13 +4,17 @@ import com.jiraagentic.app.dto.CommentDto;
 import com.jiraagentic.app.dto.CreateCommentRequest;
 import com.jiraagentic.app.entity.Comment;
 import com.jiraagentic.app.entity.Issue;
+import com.jiraagentic.app.event.CommentContentChangedEvent;
+import com.jiraagentic.app.event.CommentDeletedEvent;
 import com.jiraagentic.app.repository.CommentRepository;
 import com.jiraagentic.app.repository.IssueRepository;
 import com.jiraagentic.app.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -24,6 +28,7 @@ public class CommentService {
     private final IssueHistoryService issueHistoryService;
     private final IssueAttachmentService issueAttachmentService;
     private final ActiveSpaceGuard activeSpaceGuard;
+    private final ApplicationEventPublisher applicationEventPublisher;
 
     public List<CommentDto> findByIssue(Long issueId) {
         Issue issue = issueRepository.findById(issueId)
@@ -47,6 +52,9 @@ public class CommentService {
         comment.setContent(req.getContent());
         Comment saved = commentRepository.save(comment);
         issueHistoryService.recordEvent(issue, req.getAuthorId(), "comment_created", "added a comment");
+        applicationEventPublisher.publishEvent(new CommentContentChangedEvent(
+                saved.getId(), issue.getId(), issue.getIssueKey(), issue.getSpace().getId(),
+                saved.getContent(), Instant.now()));
         return CommentDto.from(saved);
     }
 
@@ -67,6 +75,9 @@ public class CommentService {
         );
         issueAttachmentService.reconcileEmbeddedAttachments(saved.getIssue().getId(),
                 saved.getAuthor() != null ? saved.getAuthor().getId() : null);
+        applicationEventPublisher.publishEvent(new CommentContentChangedEvent(
+                saved.getId(), saved.getIssue().getId(), saved.getIssue().getIssueKey(),
+                saved.getIssue().getSpace().getId(), saved.getContent(), Instant.now()));
         return CommentDto.from(saved);
     }
 
@@ -84,8 +95,12 @@ public class CommentService {
                 "deleted a comment"
         );
         Long issueId = comment.getIssue().getId();
+        String issueKey = comment.getIssue().getIssueKey();
+        Long spaceId = comment.getIssue().getSpace().getId();
         Long actorId = comment.getAuthor() != null ? comment.getAuthor().getId() : null;
         commentRepository.deleteById(commentId);
         issueAttachmentService.reconcileEmbeddedAttachments(issueId, actorId);
+        applicationEventPublisher.publishEvent(new CommentDeletedEvent(
+                commentId, issueId, issueKey, spaceId, Instant.now()));
     }
 }

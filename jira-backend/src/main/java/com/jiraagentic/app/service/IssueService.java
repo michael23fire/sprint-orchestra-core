@@ -8,11 +8,15 @@ import com.jiraagentic.app.entity.Issue;
 import com.jiraagentic.app.entity.Label;
 import com.jiraagentic.app.entity.Space;
 import com.jiraagentic.app.entity.Sprint;
+import com.jiraagentic.app.event.IssueContentChangedEvent;
+import com.jiraagentic.app.event.IssueDeletedEvent;
 import com.jiraagentic.app.repository.*;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -39,6 +43,7 @@ public class IssueService {
     private final ActiveSpaceGuard activeSpaceGuard;
     private final LabelService labelService;
     private final SprintHistoryService sprintHistoryService;
+    private final ApplicationEventPublisher applicationEventPublisher;
 
     public List<IssueDto> findBySpace(Long spaceId) {
         activeSpaceGuard.requireActive(spaceId);
@@ -112,6 +117,17 @@ public class IssueService {
         Issue saved = issueRepository.save(issue);
         sprintHistoryService.trackAdded(saved.getSprint(), saved);
         issueHistoryService.recordEvent(saved, creatorUserId, "issue_created", "Issue created");
+        applicationEventPublisher.publishEvent(new IssueContentChangedEvent(
+                saved.getId(), saved.getIssueKey(), saved.getSpace().getId(),
+                saved.getTitle(), saved.getDescription(),
+                saved.getIssueType(), saved.getStatus(),
+                saved.getSprint() != null ? saved.getSprint().getId() : null,
+                saved.getSprint() != null ? saved.getSprint().getName() : null,
+                saved.getParent() != null ? saved.getParent().getId() : null,
+                saved.getParent() != null ? saved.getParent().getIssueKey() : null,
+                saved.getParent() != null ? saved.getParent().getTitle() : null,
+                saved.getCreatedAt(), saved.getUpdatedAt(),
+                Instant.now()));
         return toDto(saved);
     }
 
@@ -215,6 +231,25 @@ public class IssueService {
         if (req.getDescription() != null && !Objects.equals(oldDescription, saved.getDescription())) {
             issueAttachmentService.reconcileEmbeddedAttachments(saved.getId(), actorUserId);
         }
+        // Re-embed when the embeddable text changed, OR when the parent link changed — the parent's
+        // key/title is injected into this issue's own embedded chunk (see IssueContentChangedEvent's
+        // doc), so a re-parent must re-embed even if this issue's own title/description didn't move.
+        // Plain status/priority/sprint edits still don't affect the vector, so they're excluded.
+        String newParentKey = saved.getParent() != null ? saved.getParent().getIssueKey() : null;
+        if (!Objects.equals(oldTitle, saved.getTitle()) || !Objects.equals(oldDescription, saved.getDescription())
+                || !Objects.equals(oldParent, newParentKey)) {
+            applicationEventPublisher.publishEvent(new IssueContentChangedEvent(
+                    saved.getId(), saved.getIssueKey(), saved.getSpace().getId(),
+                    saved.getTitle(), saved.getDescription(),
+                    saved.getIssueType(), saved.getStatus(),
+                    saved.getSprint() != null ? saved.getSprint().getId() : null,
+                    saved.getSprint() != null ? saved.getSprint().getName() : null,
+                    saved.getParent() != null ? saved.getParent().getId() : null,
+                    newParentKey,
+                    saved.getParent() != null ? saved.getParent().getTitle() : null,
+                    saved.getCreatedAt(), saved.getUpdatedAt(),
+                    Instant.now()));
+        }
         boolean sprintChanged = req.getSprintId() != null || Boolean.TRUE.equals(req.getClearSprint());
         if (sprintChanged) {
             cascadeSprintToChildren(saved.getId(), saved.getSprint());
@@ -317,6 +352,11 @@ public class IssueService {
             purgeIssueDependencies(issueId);
             Issue toDelete = issueRepository.findById(issueId)
                     .orElseThrow(() -> new RuntimeException("Issue not found: id=" + issueId));
+            // Emit before delete so the key/space are still loadable; the AFTER_COMMIT listener
+            // fires only once the whole transaction commits. One event purges the issue's issue,
+            // comment, and attachment vectors in the separate vector store.
+            applicationEventPublisher.publishEvent(new IssueDeletedEvent(
+                    toDelete.getId(), toDelete.getIssueKey(), toDelete.getSpace().getId(), Instant.now()));
             issueRepository.delete(toDelete);
         }
     }

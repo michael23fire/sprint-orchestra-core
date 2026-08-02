@@ -7,14 +7,18 @@ import com.jiraagentic.app.dto.SprintDto;
 import com.jiraagentic.app.entity.Issue;
 import com.jiraagentic.app.entity.Space;
 import com.jiraagentic.app.entity.Sprint;
+import com.jiraagentic.app.event.SprintContentChangedEvent;
+import com.jiraagentic.app.event.SprintDeletedEvent;
 import com.jiraagentic.app.repository.IssueRepository;
 import com.jiraagentic.app.repository.SpaceRepository;
 import com.jiraagentic.app.repository.SprintIssueHistoryRepository;
 import com.jiraagentic.app.repository.SprintRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -32,6 +36,20 @@ public class SprintService {
     private final ActiveSpaceGuard activeSpaceGuard;
     private final SprintHistoryService sprintHistoryService;
     private final SprintIssueHistoryRepository sprintIssueHistoryRepository;
+    private final ApplicationEventPublisher applicationEventPublisher;
+
+    /** Bridges a saved Sprint to the RAG content-ingestion stream — see SprintContentChangedEvent's
+     *  docstring for why the goal text specifically needs its own event to be searchable at all. */
+    private void publishSprintChanged(Sprint saved) {
+        applicationEventPublisher.publishEvent(new SprintContentChangedEvent(
+                saved.getId(), saved.getName(), saved.getSpace().getId(), saved.getGoal(),
+                saved.getStartDate(), saved.getEndDate(), saved.getStatus(),
+                saved.getInitialCommittedPoints(), saved.getInitialCompletedPoints(),
+                saved.getFinalScopePoints(), saved.getCompletedPoints(),
+                saved.getInitialIssueCount(), saved.getCompletedIssueCount(),
+                saved.getFinalIssueCount(), saved.getUnestimatedIssueCount(),
+                Instant.now()));
+    }
 
     /**
      * Jira backlog order: completed (closed) first → active → future (by sprint_order).
@@ -103,6 +121,7 @@ public class SprintService {
             sprintHistoryService.assertSprintReady(issues);
             sprintHistoryService.snapshotInitialScope(saved, issues);
         }
+        publishSprintChanged(saved);
         return SprintDto.from(saved);
     }
 
@@ -147,6 +166,7 @@ public class SprintService {
         if (starting) sprintHistoryService.assertSprintReady(issues);
         Sprint saved = sprintRepository.save(sprint);
         if (starting) sprintHistoryService.snapshotInitialScope(saved, issues);
+        publishSprintChanged(saved);
         return SprintDto.from(saved);
     }
 
@@ -278,7 +298,13 @@ public class SprintService {
         }
 
         sprint.setStatus("completed");
-        return SprintDto.from(sprintRepository.save(sprint));
+        Sprint saved = sprintRepository.save(sprint);
+        publishSprintChanged(saved);
+        // The incomplete issues just moved to destinationSprint above bypass IssueService.update(),
+        // so no per-issue IssueHistoryRecordedEvent/'sprint' field_change fires for them — same
+        // documented gap as the identical bulk-reassignment path in delete() below. Their vecdb
+        // sprint_id/sprint_name snapshot goes stale until the next edit or backfill touches them.
+        return SprintDto.from(saved);
     }
 
     /** Resolves the destination for incomplete issues: null for backlog, or a future sprint (existing or newly created). */
@@ -357,6 +383,11 @@ public class SprintService {
 
         sprintIssueHistoryRepository.deleteBySprint_Id(id);
         sprintRepository.deleteById(id);
+        // Same bulk-reassignment caveat as complete() above: issues moved off this sprint just now
+        // bypass IssueService.update(), so their vecdb sprint snapshot doesn't update until their
+        // next real edit or the next backfill — documented, not silently dropped.
+        applicationEventPublisher.publishEvent(
+                new SprintDeletedEvent(sprint.getId(), sprint.getName(), sprint.getSpace().getId(), Instant.now()));
     }
 
     private void assertSprintInSpace(Sprint sprint, Long spaceId) {
