@@ -1,0 +1,12 @@
+[project]
+name = "vectorization-service"
+version = "0.1.0"
+description = "RAG ingestion service: consumes jira content/attachment events from Kafka, chunks + embeds them, and writes vectors to pgvector."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]

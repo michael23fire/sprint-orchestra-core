@@ -1,0 +1,40 @@
+# --- Web / config ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# --- Kafka ---
+aiokafka==0.12.0
+
+# --- Postgres + pgvector ---
+asyncpg==0.30.0
+pgvector==0.3.6
+numpy==2.2.1
+
+# --- Ingestion ---
+tiktoken==0.8.0
+beautifulsoup4==4.12.3
+httpx==0.27.2
+tenacity==9.0.0
+anthropic==0.42.0  # contextual retrieval (app/ingest/contextualizer.py); off by default
+
+# --- Attachments (object storage + document parsing) ---
+boto3==1.35.90
+docling==2.14.0
+# Both already ship transitively with docling, but standalone-image attachments now call them
+# directly (app/ingest/docling_parser.py) rather than only through Docling's own pipeline, so they're
+# declared as direct dependencies here too — relying on another package's transitive deps staying the
+# same across docling version bumps would be fragile.
+easyocr==1.7.2
+Pillow==11.0.0
+
+# --- Reranking (optional, VEC_RERANK_ENABLED=true; app/db/reranker.py) ---
+sentence-transformers==3.3.1
+
+# --- Observability (app/observability.py) ---
+prometheus-client==0.21.1
+
+# --- Tests ---
+pytest==8.3.4
+pytest-asyncio==0.25.0
