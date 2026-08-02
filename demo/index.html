@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Sprint Orchestra — RAG / Agentic AI Demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 980px;
+         margin: 0 auto; padding: 24px 16px 80px; line-height: 1.45; }
+  h1 { font-size: 1.4rem; margin-bottom: 4px; }
+  .sub { color: #888; margin-bottom: 20px; font-size: 0.9rem; }
+  fieldset { border: 1px solid #8883; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; }
+  legend { font-weight: 600; padding: 0 6px; }
+  label { display: block; font-size: 0.8rem; color: #888; margin-top: 8px; }
+  input, textarea, select { width: 100%; box-sizing: border-box; padding: 8px; margin-top: 2px;
+    border-radius: 6px; border: 1px solid #8886; font-size: 0.95rem; background: transparent; color: inherit; }
+  textarea { min-height: 60px; resize: vertical; }
+  button { margin-top: 10px; padding: 9px 18px; border-radius: 6px; border: none; background: #4f6df5;
+           color: white; font-weight: 600; cursor: pointer; font-size: 0.9rem; }
+  button:hover { background: #3e58d6; }
+  button.secondary { background: #8886; color: inherit; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 140px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.75rem;
+           font-weight: 600; margin-right: 6px; margin-bottom: 4px; }
+  .badge.ok { background: #1f9d5522; color: #1f9d55; }
+  .badge.warn { background: #d9822622; color: #d98226; }
+  .badge.info { background: #4f6df522; color: #4f6df5; }
+  .badge.muted { background: #8882; color: #888; }
+  .result { border: 1px solid #8883; border-radius: 8px; padding: 14px; margin-top: 14px; }
+  .hit { border-top: 1px solid #8882; padding: 10px 0; }
+  .hit:first-child { border-top: none; }
+  .hit .meta { font-size: 0.78rem; color: #888; margin-bottom: 3px; }
+  .presets button { background: #8886; color: inherit; margin: 3px 6px 3px 0; font-weight: 500;
+                     font-size: 0.82rem; padding: 6px 10px; }
+  .presets button:hover { background: #8889; }
+  .presets .cat { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: #888;
+                   margin-top: 10px; display: block; }
+  pre.answer { white-space: pre-wrap; font-family: inherit; margin: 0; }
+  .loading { opacity: 0.6; }
+  .stats-line { font-size: 0.82rem; color: #888; margin-top: 8px; }
+  code { background: #8882; padding: 1px 5px; border-radius: 4px; }
+  .loading-card { border-style: dashed; }
+  .spinner { display: inline-block; width: 14px; height: 14px; margin-right: 6px; vertical-align: -2px;
+             border: 2px solid #8886; border-top-color: #4f6df5; border-radius: 50%;
+             animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .elapsed-line { margin-top: 6px; }
+  .fade-in { animation: fadeIn 0.2s ease-out; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+  button:disabled { opacity: 0.6; cursor: default; }
+</style>
+</head>
+<body>
+
+<h1>Sprint Orchestra — RAG / Agentic AI / GenAI demo</h1>
+<p class="sub">
+  Talks directly to <code>ai-service</code> (agentic corrective-RAG) and <code>vectorization-service</code>
+  (hybrid retrieval) over HTTP. No backend of its own — this is a static page, open it directly or serve it
+  with <code>python -m http.server</code> from this folder.
+</p>
+
+<fieldset>
+  <legend>Connection</legend>
+  <div class="row">
+    <div>
+      <label>ai-service URL</label>
+      <input id="aiUrl" value="http://localhost:8200" />
+    </div>
+    <div>
+      <label>vectorization-service URL</label>
+      <input id="vecUrl" value="http://localhost:8100" />
+    </div>
+    <div style="max-width:140px">
+      <label>space_ids</label>
+      <input id="spaceIds" value="5000014" />
+    </div>
+  </div>
+  <button class="secondary" onclick="checkHealth()">Check both /healthz</button>
+  <button class="secondary" onclick="loadStats()">Refresh /stats (both)</button>
+  <div id="healthOut" class="stats-line"></div>
+</fieldset>
+
+<fieldset>
+  <legend>1. Ask — agentic corrective-RAG (<code>POST /ask</code>)</legend>
+  <label>Question</label>
+  <textarea id="question" placeholder="Ask something about the AtlasCart workspace..."></textarea>
+  <button onclick="ask(this)">Ask</button>
+  <label style="display:inline-flex; align-items:center; gap:6px; margin-top:10px; cursor:pointer">
+    <input type="checkbox" id="showTiming" style="width:auto; margin:0" /> Show stage latency breakdown
+  </label>
+
+  <div class="presets">
+    <span class="cat">Grounded — should answer confidently, with citations (ATC-*)</span>
+    <button onclick="setQ('How was checkout built for the private beta, and did it pass testing?')">checkout / private beta</button>
+    <button onclick="setQ('What did the product catalog import work involve?')">catalog import</button>
+
+    <span class="cat">Abstention — not in this dataset, should honestly say so</span>
+    <button onclick="setQ('What is our Net Promoter Score from customer surveys?')">NPS survey score</button>
+    <button onclick="setQ('Does AtlasCart support cryptocurrency payments?')">crypto payments</button>
+
+    <span class="cat">Corrective retrieval — vague phrasing, watch queries_used reformulate</span>
+    <button onclick="setQ('the cart thing is broken')">cart thing broken</button>
+    <button onclick="setQ('staging release problem')">staging release problem</button>
+
+    <span class="cat">Sprint reasoning / why — carry-over, blockers, multi-hop</span>
+    <button onclick="setQ('Why did any work carry over between sprints?')">sprint carry-over</button>
+    <button onclick="setQ('What blocked the private beta release and how was it resolved?')">beta blockers</button>
+
+    <span class="cat">Cache demo — ask the exact same question again right after any of the above</span>
+    <button onclick="askAgain(this)">Re-run last question (watch cache_hit + latency)</button>
+  </div>
+
+  <div id="askOut"></div>
+</fieldset>
+
+<fieldset>
+  <legend>2. Search — hybrid retrieval (<code>POST /search</code>)</legend>
+  <div class="row">
+    <div style="flex: 3">
+      <label>Query</label>
+      <input id="searchQuery" placeholder="e.g. why did checkout fail" />
+    </div>
+    <div>
+      <label>Mode</label>
+      <select id="searchMode">
+        <option value="hybrid" selected>hybrid</option>
+        <option value="vector">vector</option>
+        <option value="lexical">lexical</option>
+      </select>
+    </div>
+    <div style="max-width:90px">
+      <label>Limit</label>
+      <input id="searchLimit" value="5" />
+    </div>
+  </div>
+  <button onclick="search(this)">Search</button>
+
+  <div class="presets">
+    <span class="cat">Try the same query in all 3 modes to see hybrid's value</span>
+    <button onclick="setSQ('getting the storefront ready for shoppers')">semantic phrasing</button>
+    <span class="cat">Exact identifiers — where lexical wins and vector structurally can't</span>
+    <button onclick="setSQ('ATC-34')">ATC-34 (exact key)</button>
+  </div>
+
+  <div id="searchOut"></div>
+</fieldset>
+
+<fieldset>
+  <legend>3. AI-assisted task creation (<code>POST /draft-task</code>)</legend>
+  <p class="stats-line" style="margin-top:0">
+    One structured-output call (Instructor + Pydantic, Jinja2-templated prompt) turns a rough
+    description into a title/labels/estimate/dependencies draft. Never blocks task creation — if the
+    model fails, you still get a usable fallback draft (watch for the <code>degraded</code> badge).
+  </p>
+  <label>Rough description</label>
+  <textarea id="draftDesc" placeholder="e.g. sellers keep uploading huge catalog images and it's slowing down the product list page..."></textarea>
+  <label>Existing labels (comma-separated, optional — model will prefer reusing these)</label>
+  <input id="draftLabels" value="backend, frontend, bug, performance, security, infra" />
+  <button onclick="draftTask(this)">Draft task</button>
+
+  <div class="presets">
+    <span class="cat">Try these — real-flavored descriptions, not synthetic test strings</span>
+    <button onclick="setDraft('Sellers keep uploading catalog images that are way too big and it is slowing down the product list page. We should compress and resize images on upload before they hit storage. This probably needs the image processing pipeline from the catalog import work to be done first.')">image upload perf</button>
+    <button onclick="setDraft('Customers are asking why they cannot track their order after checkout. We never built a tracking page.')">order tracking</button>
+    <button onclick="setDraft('quick note: the login page looks a bit off on mobile, someone should take a look eventually')">vague/low-signal note</button>
+  </div>
+
+  <div id="draftOut"></div>
+</fieldset>
+
+<script>
+const $ = id => document.getElementById(id);
+let lastQuestion = "";
+
+function aiBase() { return $('aiUrl').value.replace(/\/$/, ''); }
+function vecBase() { return $('vecUrl').value.replace(/\/$/, ''); }
+function spaceIds() { return $('spaceIds').value.split(',').map(s => parseInt(s.trim(), 10)).filter(Boolean); }
+function setQ(q) { $('question').value = q; }
+function setSQ(q) { $('searchQuery').value = q; }
+function setDraft(q) { $('draftDesc').value = q; }
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// Renders a fetch error body as readable, escaped HTML instead of dumping raw (unescaped) text —
+// error responses can be a plain string, a FastAPI {"detail": ...} blob, or an HTML error page from
+// a proxy in front of the service, none of which are safe or pleasant to inject as-is.
+function formatErrorBody(bodyText) {
+  try {
+    const j = JSON.parse(bodyText);
+    if (typeof j.detail === 'string') return escapeHtml(j.detail);
+    return `<pre class="answer">${escapeHtml(JSON.stringify(j, null, 2))}</pre>`;
+  } catch {
+    return escapeHtml(bodyText);
+  }
+}
+
+// Local/self-hosted models can take anywhere from a few seconds to well over a minute (reasoning
+// models "think" before emitting the structured output) — this is the difference between "still
+// working" and "looks broken." Shows a boxed spinner + live elapsed timer, disables the triggering
+// button so it can't be double-clicked, and aborts with a friendly, retryable message if nothing
+// comes back within timeoutMs instead of hanging forever with no feedback.
+async function withLoading(btn, out, { busyText, message, timeoutMs = 90000 }, fn) {
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = busyText;
+  const start = performance.now();
+  out.innerHTML = `<div class="result loading-card">
+      <span class="spinner" aria-hidden="true"></span><b>${escapeHtml(message)}</b>
+      <div class="stats-line elapsed-line">0s elapsed</div>
+    </div>`;
+  const elapsedEl = out.querySelector('.elapsed-line');
+  const timer = setInterval(() => {
+    const s = Math.round((performance.now() - start) / 1000);
+    let note = '';
+    if (s >= 30) note = ' — still working, this can take a while for larger inputs or local reasoning models';
+    else if (s >= 10) note = ' — still working…';
+    elapsedEl.textContent = `${s}s elapsed${note}`;
+  }, 1000);
+  const controller = new AbortController();
+  const killer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    await fn(controller.signal);
+  } finally {
+    clearInterval(timer);
+    clearTimeout(killer);
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
+}
+
+async function checkHealth() {
+  const out = $('healthOut');
+  out.textContent = 'checking...';
+  try {
+    const [a, v] = await Promise.all([
+      fetch(aiBase() + '/healthz').then(r => r.json()),
+      fetch(vecBase() + '/healthz').then(r => r.json()),
+    ]);
+    out.textContent = `ai-service: ${JSON.stringify(a)}   |   vectorization-service: ${JSON.stringify(v)}`;
+  } catch (e) {
+    out.textContent = 'Could not reach one or both services. Are they running? (' + e + ')';
+  }
+}
+
+async function loadStats() {
+  const out = $('healthOut');
+  try {
+    const [a, v] = await Promise.all([
+      fetch(aiBase() + '/stats').then(r => r.json()),
+      fetch(vecBase() + '/stats').then(r => r.json()),
+    ]);
+    out.innerHTML = `ai-service /stats: requests=${a.requests}, tokens=${a.total_input_tokens}/${a.total_output_tokens}, ` +
+      `total_cost_usd=$${a.total_cost_usd} &nbsp;|&nbsp; vectorization-service /stats: processed=${v.processed}, vector_count=${v.vector_count}`;
+  } catch (e) {
+    out.textContent = 'Could not load /stats: ' + e;
+  }
+}
+
+async function ask(btn) {
+  const question = $('question').value.trim();
+  if (!question) return;
+  lastQuestion = question;
+  await runAsk(question, btn);
+}
+async function askAgain(btn) {
+  if (!lastQuestion) { alert('Ask something first.'); return; }
+  await runAsk(lastQuestion, btn);
+}
+
+async function runAsk(question, btn) {
+  const out = $('askOut');
+  await withLoading(btn, out, {
+    busyText: 'Asking…',
+    message: 'Asking… a fresh answer can take several seconds — it may search more than once.',
+  }, async (signal) => {
+    const start = performance.now();
+    try {
+      const resp = await fetch(aiBase() + '/ask', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({question, space_ids: spaceIds()}),
+        signal,
+      });
+      const elapsed = Math.round(performance.now() - start);
+      if (!resp.ok) {
+        const body = await resp.text();
+        out.innerHTML = `<div class="result"><span class="badge warn">HTTP ${resp.status}</span> ${formatErrorBody(body)}</div>`;
+        return;
+      }
+      const d = await resp.json();
+      const badges = [
+        d.cacheHit ? '<span class="badge ok">cache hit</span>' : '<span class="badge muted">cache miss</span>',
+        d.abstained ? '<span class="badge warn">abstained</span>' : '<span class="badge ok">answered</span>',
+        `<span class="badge info">${d.retrievalRounds} retrieval round(s)</span>`,
+        `<span class="badge muted">${elapsed}ms</span>`,
+        `<span class="badge muted">$${d.estimatedCostUsd.toFixed(6)} · ${d.inputTokens}/${d.outputTokens} tok</span>`,
+      ].join(' ');
+      const queries = d.queriesUsed.length
+        ? `<p class="stats-line"><b>queries_used:</b> ${d.queriesUsed.map(q => `<code>${escapeHtml(q)}</code>`).join(' → ')}</p>` : '';
+      const citations = d.citations.length
+        ? d.citations.map(c => `<div class="hit"><div class="meta">${c.issueKey} · ${c.chunkType}</div>${escapeHtml(c.content)}</div>`).join('')
+        : '<p class="stats-line">(no citations)</p>';
+      // Server-measured wall-clock split for THIS request (cache lookup / retrieval tool calls / LLM
+      // calls) — not the same number as the `elapsed` badge above, which is round-trip time measured
+      // in the browser and also includes network + JSON parsing the server-side split doesn't see.
+      const t = d.stageTimings;
+      const timing = ($('showTiming').checked && t)
+        ? `<p class="stats-line" style="margin-top:10px"><b>Stage latency (server-measured)</b></p>
+           <p class="stats-line">cache lookup: ${t.cacheLookupMs}ms &nbsp;|&nbsp; retrieval: ${t.retrievalMs}ms &nbsp;|&nbsp; LLM calls: ${t.llmMs}ms &nbsp;|&nbsp; total: ${t.totalMs}ms</p>`
+        : '';
+      out.innerHTML = `<div class="result fade-in">
+          ${badges}
+          <pre class="answer" style="margin-top:10px">${escapeHtml(d.answer)}</pre>
+          ${queries}
+          ${timing}
+          <p class="stats-line" style="margin-top:10px"><b>Citations</b></p>
+          ${citations}
+        </div>`;
+    } catch (e) {
+      out.innerHTML = e.name === 'AbortError'
+        ? `<div class="result"><span class="badge warn">timed out</span> No response after 90s — ai-service or the model may be stuck. <button class="secondary" onclick="ask(this)">Retry</button></div>`
+        : `<div class="result"><span class="badge warn">request failed</span> ${escapeHtml(String(e))} — is ai-service running and reachable at ${escapeHtml(aiBase())}?</div>`;
+    }
+  });
+}
+
+async function search(btn) {
+  const query = $('searchQuery').value.trim();
+  if (!query) return;
+  const out = $('searchOut');
+  await withLoading(btn, out, {
+    busyText: 'Searching…',
+    message: 'Searching…',
+  }, async (signal) => {
+    const start = performance.now();
+    try {
+      const resp = await fetch(vecBase() + '/search', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          query, space_ids: spaceIds(), mode: $('searchMode').value,
+          limit: parseInt($('searchLimit').value, 10) || 5,
+        }),
+        signal,
+      });
+      const elapsed = Math.round(performance.now() - start);
+      if (!resp.ok) {
+        const body = await resp.text();
+        out.innerHTML = `<div class="result"><span class="badge warn">HTTP ${resp.status}</span> ${formatErrorBody(body)}</div>`;
+        return;
+      }
+      const d = await resp.json();
+      const header = `<span class="badge info">mode: ${d.mode}</span> ` +
+        (d.reranked ? '<span class="badge ok">reranked</span>' : '') +
+        `<span class="badge muted">${elapsed}ms</span> <span class="badge muted">${d.hits.length} hit(s)</span>`;
+      const hits = d.hits.length
+        ? d.hits.map((h, i) => `<div class="hit">
+              <div class="meta">#${i+1} · ${h.issue_key} · ${h.chunk_type} · score=${h.score.toFixed(3)} · via [${h.retrievers.join(', ')}]</div>
+              ${escapeHtml(h.content)}
+            </div>`).join('')
+        : '<p class="stats-line">No hits — e.g. an exact-key query in `vector` mode structurally can\'t match; try `lexical`.</p>';
+      out.innerHTML = `<div class="result fade-in">${header}${hits}</div>`;
+    } catch (e) {
+      out.innerHTML = e.name === 'AbortError'
+        ? `<div class="result"><span class="badge warn">timed out</span> No response after 90s. <button class="secondary" onclick="search(this)">Retry</button></div>`
+        : `<div class="result"><span class="badge warn">request failed</span> ${escapeHtml(String(e))} — is vectorization-service running and reachable at ${escapeHtml(vecBase())}?</div>`;
+    }
+  });
+}
+
+async function draftTask(btn) {
+  const description = $('draftDesc').value.trim();
+  if (!description) return;
+  const existingLabels = $('draftLabels').value.split(',').map(s => s.trim()).filter(Boolean);
+  const out = $('draftOut');
+  await withLoading(btn, out, {
+    busyText: 'Drafting…',
+    message: 'Drafting task… local reasoning models can take 10–30s (occasionally longer) — this box stays up the whole time.',
+  }, async (signal) => {
+    try {
+      const resp = await fetch(aiBase() + '/draft-task', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({description, existing_labels: existingLabels}),
+        signal,
+      });
+      if (!resp.ok) {
+        const body = await resp.text();
+        out.innerHTML = `<div class="result"><span class="badge warn">HTTP ${resp.status}</span> ${formatErrorBody(body)}</div>`;
+        return;
+      }
+      const d = await resp.json();
+      const draft = d.draft;
+      const badges = [
+        d.degraded
+          ? '<span class="badge warn">degraded — unassisted fallback</span>'
+          : '<span class="badge ok">AI-drafted</span>',
+        `<span class="badge info">${escapeHtml(draft.issue_type)}</span>`,
+        `<span class="badge muted">${d.latency_seconds}s</span>`,
+      ].join(' ');
+      const labels = draft.labels.length
+        ? draft.labels.map(l => `<span class="badge muted">${escapeHtml(l)}</span>`).join(' ')
+        : '<span class="stats-line">(none)</span>';
+      const deps = draft.dependencies.length
+        ? draft.dependencies.map(dep => `<div class="hit">${escapeHtml(dep)}</div>`).join('')
+        : '<p class="stats-line">(none stated)</p>';
+      out.innerHTML = `<div class="result fade-in">
+          ${badges}
+          <p style="margin-top:10px; font-size:1.05rem"><b>${escapeHtml(draft.title)}</b></p>
+          <p class="stats-line"><b>Labels:</b> ${labels}</p>
+          <p class="stats-line"><b>Estimate:</b> ${draft.estimate_story_points === null ? 'null (not enough signal — correct behavior, not a bug)' : draft.estimate_story_points + ' story points'}</p>
+          <p class="stats-line" style="margin-top:10px"><b>Dependencies</b></p>
+          ${deps}
+        </div>`;
+    } catch (e) {
+      out.innerHTML = e.name === 'AbortError'
+        ? `<div class="result"><span class="badge warn">timed out</span> No response after 90s — ai-service or the model may be stuck. <button class="secondary" onclick="draftTask(this)">Retry</button></div>`
+        : `<div class="result"><span class="badge warn">request failed</span> ${escapeHtml(String(e))} — is ai-service running and reachable at ${escapeHtml(aiBase())}?</div>`;
+    }
+  });
+}
+
+checkHealth();
+</script>
+</body>
+</html>
