@@ -1,0 +1,2 @@
+Method,Name,Error,Occurrences,First Seen,Last Seen
+POST,/ask,HTTPError('502 Server Error: Bad Gateway for url: /ask'),20,2026-07-23T21:08:47Z,2026-07-23T21:09:59Z

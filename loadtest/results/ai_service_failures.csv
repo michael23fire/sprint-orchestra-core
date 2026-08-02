@@ -1,0 +1,2 @@
+Method,Name,Error,Occurrences,First Seen,Last Seen
+POST,/ask,HTTPError('500 Server Error: Internal Server Error for url: /ask'),44,2026-07-23T21:01:42Z,2026-07-23T21:02:51Z
