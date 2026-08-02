@@ -54,6 +54,128 @@ spring:
             allow-credentials: true
 
       routes:
+        # ai-service: AI-assisted task creation (POST /draft-task -> Instructor+Pydantic structured
+        # output). Must precede backend-api below (same reasoning as backend-github-long-ops: a
+        # Path=/api/** predicate would otherwise swallow /api/ai/** and forward it to the Java
+        # backend on 8081, which has no such route). No user-identity header propagation needed
+        # here — draft-task takes no space-scoped parameters at all, so there's no permission
+        # boundary to enforce at this hop; JWT authentication alone (already enforced globally for
+        # /api/** by GatewaySecurityConfig) is the only gate this route needs. A longer
+        # response-timeout than the default 10s is real, not padding: local-model latency measured
+        # live in ai-service's own eval was P95 23s / max 27s (see ai-service/README.md
+        # "AI-assisted task creation").
+        - id: ai-service-draft-task
+          uri: ${AI_SERVICE_URL:http://127.0.0.1:8200}
+          predicates:
+            - Path=/api/ai/draft-task
+          filters:
+            - StripPrefix=2
+            - name: CircuitBreaker
+              args:
+                name: aiService
+                fallbackUri: forward:/fallback
+          metadata:
+            response-timeout: ${GATEWAY_AI_RESPONSE_TIMEOUT_MS:60000}
+            connect-timeout: ${GATEWAY_HTTP_CONNECT_TIMEOUT_MS:5000}
+        # AI-assisted epic planning (POST /plan-epic -> one Instructor+Pydantic call decomposing a
+        # proposal into an epic + up to ~12 issues, then deterministic dependency-ordering + sprint
+        # bin-packing). Own circuit breaker/timelimiter (aiServicePlanning, not the shared aiService
+        # one): drafting a whole epic's worth of issues in one LLM round trip is a meaningfully longer
+        # call than the single-issue /draft-task, so it needs more headroom without loosening
+        # draft-task's tighter budget — same reasoning as backendScan getting its own breaker,
+        # separate from backendApi, for long-running GitHub ops above.
+        - id: ai-service-plan-epic
+          uri: ${AI_SERVICE_URL:http://127.0.0.1:8200}
+          predicates:
+            - Path=/api/ai/plan-epic,/api/ai/plan-epic/refine
+          filters:
+            - StripPrefix=2
+            - name: CircuitBreaker
+              args:
+                name: aiServicePlanning
+                fallbackUri: forward:/fallback
+          metadata:
+            response-timeout: ${GATEWAY_AI_PLAN_RESPONSE_TIMEOUT_MS:120000}
+            connect-timeout: ${GATEWAY_HTTP_CONNECT_TIMEOUT_MS:5000}
+        # Agentic Q&A (POST /ask -> CragAgent: up to a few retrieve-and-reassess rounds, each a real
+        # LLM call). `spaceIds` is supplied by the *caller* (the frontend, sourced from SpaceContext —
+        # the spaces jira-backend already returned as this user's own space list), not re-validated
+        # against space membership at this hop. That is a deliberate match to jira-backend's own
+        # baseline today: ActiveSpaceGuard (jira-backend) only checks a space exists/isn't deleted,
+        # not that the caller is a member of it — the same trust boundary the rest of this app already
+        # has, not a new, stricter or looser one introduced here. JWT authentication (global) is still
+        # required to reach this route at all.
+        #
+        # 300s default, not 90s: a real measurement against the local dev model (see
+        # eval/prompt_injection_probe.py's run, ai-service `stageTimings`) found a demanding multi-hop
+        # question with 4 corrective-retrieval rounds took 210s wall-clock, almost entirely LLM
+        # inference time (retrieval itself was 147ms of that — negligible). This is a LOCAL-MODEL-SPEED
+        # number, not an architectural one: production, pointed at a cloud frontier model or a
+        # GPU-backed vLLM instance, would see the same loop finish in single-digit seconds — this value
+        # should be tightened back down per-environment via the env var below when that's true, not left
+        # at this dev-generous default.
+        - id: ai-service-ask
+          uri: ${AI_SERVICE_URL:http://127.0.0.1:8200}
+          predicates:
+            - Path=/api/ai/ask
+          filters:
+            - StripPrefix=2
+            - name: CircuitBreaker
+              args:
+                name: aiServiceAsk
+                fallbackUri: forward:/fallback
+          metadata:
+            response-timeout: ${GATEWAY_AI_ASK_RESPONSE_TIMEOUT_MS:300000}
+            connect-timeout: ${GATEWAY_HTTP_CONNECT_TIMEOUT_MS:5000}
+        # SSE variant of the route above: same backend call, same timeout reasoning, but the response
+        # is `text/event-stream` (progress events, then a final result event) instead of one blocking
+        # JSON body — see ai-service's `POST /ask/stream` and AskAiPanel.tsx. No CircuitBreaker filter
+        # here deliberately: Resilience4j's reactive breaker buffers/wraps the response to be able to
+        # invoke a fallback, which works against a streamed body — a slow or failed backend here should
+        # surface as a dropped SSE stream the frontend already handles, not a breaker-mediated fallback.
+        - id: ai-service-ask-stream
+          uri: ${AI_SERVICE_URL:http://127.0.0.1:8200}
+          predicates:
+            - Path=/api/ai/ask/stream
+          filters:
+            - StripPrefix=2
+          metadata:
+            response-timeout: ${GATEWAY_AI_ASK_RESPONSE_TIMEOUT_MS:300000}
+            connect-timeout: ${GATEWAY_HTTP_CONNECT_TIMEOUT_MS:5000}
+        # Semantic search (POST /search -> one retrieval call, no LLM, no agent loop) — backs both the
+        # "find related issues" search mode and duplicate-issue detection. Much shorter timeout than
+        # the LLM-backed routes above: this is a single HTTP call to vectorization-service's own
+        # /search, not a multi-round generation.
+        - id: ai-service-search
+          uri: ${AI_SERVICE_URL:http://127.0.0.1:8200}
+          predicates:
+            - Path=/api/ai/search
+          filters:
+            - StripPrefix=2
+            - name: CircuitBreaker
+              args:
+                name: aiServiceSearch
+                fallbackUri: forward:/fallback
+          metadata:
+            response-timeout: ${GATEWAY_AI_SEARCH_RESPONSE_TIMEOUT_MS:15000}
+            connect-timeout: ${GATEWAY_HTTP_CONNECT_TIMEOUT_MS:5000}
+        # Sprint health readout (POST /sprint-health -> one Instructor+Pydantic call over stats the
+        # caller already computed, see app/sprint_health/schemas.py). Same latency profile as
+        # /draft-task (single LLM call over compact input), so it shares that breaker/timeout rather
+        # than getting its own — unlike /plan-epic, which genuinely needs more headroom.
+        - id: ai-service-sprint-health
+          uri: ${AI_SERVICE_URL:http://127.0.0.1:8200}
+          predicates:
+            - Path=/api/ai/sprint-health
+          filters:
+            - StripPrefix=2
+            - name: CircuitBreaker
+              args:
+                name: aiService
+                fallbackUri: forward:/fallback
+          metadata:
+            response-timeout: ${GATEWAY_AI_RESPONSE_TIMEOUT_MS:60000}
+            connect-timeout: ${GATEWAY_HTTP_CONNECT_TIMEOUT_MS:5000}
         # Long-running GitHub operations (scan / bulk import / refresh) can take far longer
         # than the default 1s CircuitBreaker TimeLimiter and 10s httpclient timeout, which
         # otherwise trip the fallback ("Service temporarily unavailable"). Must precede backend-api.
@@ -136,6 +258,37 @@ resilience4j:
         failureRateThreshold: ${GATEWAY_SCAN_CB_FAILURE_RATE:50}
         waitDurationInOpenState: ${GATEWAY_SCAN_CB_OPEN_WAIT:30s}
         permittedNumberOfCallsInHalfOpenState: ${GATEWAY_SCAN_CB_HALF_OPEN_CALLS:3}
+      aiService:
+        # Small minimumNumberOfCalls/slidingWindow: this route sees far lower traffic than the main
+        # API, so the breaker should be able to trip on a handful of consecutive real failures
+        # rather than waiting for 20 calls (backendApi's threshold) that may never arrive in a demo.
+        slidingWindowSize: ${GATEWAY_AI_CB_SLIDING_WINDOW:10}
+        minimumNumberOfCalls: ${GATEWAY_AI_CB_MIN_CALLS:5}
+        failureRateThreshold: ${GATEWAY_AI_CB_FAILURE_RATE:50}
+        waitDurationInOpenState: ${GATEWAY_AI_CB_OPEN_WAIT:30s}
+        permittedNumberOfCallsInHalfOpenState: ${GATEWAY_AI_CB_HALF_OPEN_CALLS:3}
+      aiServicePlanning:
+        # Same low-traffic reasoning as aiService above, kept as its own instance rather than shared
+        # so a slow/failing /plan-epic doesn't trip the breaker for the cheaper /draft-task route.
+        slidingWindowSize: ${GATEWAY_AI_PLAN_CB_SLIDING_WINDOW:10}
+        minimumNumberOfCalls: ${GATEWAY_AI_PLAN_CB_MIN_CALLS:5}
+        failureRateThreshold: ${GATEWAY_AI_PLAN_CB_FAILURE_RATE:50}
+        waitDurationInOpenState: ${GATEWAY_AI_PLAN_CB_OPEN_WAIT:30s}
+        permittedNumberOfCallsInHalfOpenState: ${GATEWAY_AI_PLAN_CB_HALF_OPEN_CALLS:3}
+      aiServiceAsk:
+        # Same low-traffic reasoning as aiService/aiServicePlanning above — isolated so a slow/failing
+        # multi-round /ask doesn't trip the breaker for the other, cheaper ai-service routes.
+        slidingWindowSize: ${GATEWAY_AI_ASK_CB_SLIDING_WINDOW:10}
+        minimumNumberOfCalls: ${GATEWAY_AI_ASK_CB_MIN_CALLS:5}
+        failureRateThreshold: ${GATEWAY_AI_ASK_CB_FAILURE_RATE:50}
+        waitDurationInOpenState: ${GATEWAY_AI_ASK_CB_OPEN_WAIT:30s}
+        permittedNumberOfCallsInHalfOpenState: ${GATEWAY_AI_ASK_CB_HALF_OPEN_CALLS:3}
+      aiServiceSearch:
+        slidingWindowSize: ${GATEWAY_AI_SEARCH_CB_SLIDING_WINDOW:10}
+        minimumNumberOfCalls: ${GATEWAY_AI_SEARCH_CB_MIN_CALLS:5}
+        failureRateThreshold: ${GATEWAY_AI_SEARCH_CB_FAILURE_RATE:50}
+        waitDurationInOpenState: ${GATEWAY_AI_SEARCH_CB_OPEN_WAIT:30s}
+        permittedNumberOfCallsInHalfOpenState: ${GATEWAY_AI_SEARCH_CB_HALF_OPEN_CALLS:3}
   # Spring Cloud Gateway's CircuitBreaker filter wraps calls in a TimeLimiter (default 1s).
   # Raise it so normal APIs get a sane bound and long GitHub ops don't time out prematurely.
   timelimiter:
@@ -144,3 +297,21 @@ resilience4j:
         timeoutDuration: ${GATEWAY_CB_TIMEOUT:10s}
       backendScan:
         timeoutDuration: ${GATEWAY_SCAN_CB_TIMEOUT:120s}
+      aiService:
+        # Matches the route's response-timeout above — real measured local-model P95/max latency
+        # (see ai-service/README.md), not an arbitrary round number.
+        timeoutDuration: ${GATEWAY_AI_CB_TIMEOUT:60s}
+      aiServicePlanning:
+        # Matches ai-service-plan-epic's route response-timeout above. Widened from draft-task's 60s
+        # to give a multi-issue decomposition (up to ~12 issues in one structured-output call) real
+        # room — sized from a live measurement (see verification below), not a guess.
+        timeoutDuration: ${GATEWAY_AI_PLAN_CB_TIMEOUT:120s}
+      aiServiceAsk:
+        # Matches ai-service-ask's route response-timeout above — CragAgent can run several
+        # retrieve-and-reassess rounds (capped by max_tool_iterations), each a real LLM call. 300s
+        # dev-generous default per that route's comment (measured 210s against a local model); tighten
+        # per-environment once pointed at a fast production model, don't leave this value in prod.
+        timeoutDuration: ${GATEWAY_AI_ASK_CB_TIMEOUT:300s}
+      aiServiceSearch:
+        # Matches ai-service-search's route response-timeout — a single retrieval call, no LLM.
+        timeoutDuration: ${GATEWAY_AI_SEARCH_CB_TIMEOUT:15s}

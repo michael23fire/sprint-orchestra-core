@@ -51,8 +51,32 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
+  # Separate Postgres (with pgvector) owned by the vectorization-service. It keeps its own copy of
+  # the text it embeds — fed by Kafka — so it never reaches into jira-backend's `postgres` tables.
+  # The migration in vectorization-service/migrations is auto-applied on first init.
+  vecdb:
+    image: pgvector/pgvector:pg15
+    container_name: poc-vecdb
+    environment:
+      POSTGRES_DB: vecdb
+      POSTGRES_USER: vec
+      POSTGRES_PASSWORD: vec123
+    ports:
+      - "5433:5432"
+    volumes:
+      - vecdb-data:/var/lib/postgresql/data
+      # Postgres runs every *.sql in this dir, alphabetically, on first init only. Existing
+      # containers need migrations applied by hand (see vectorization-service/README.md).
+      - ./vectorization-service/migrations:/docker-entrypoint-initdb.d:ro
+
+  # redis-stack-server (not plain redis:7): adds the RediSearch module, which ai-service's semantic
+  # cache uses for native vector KNN search over cached-question embeddings (see
+  # ai-service/app/cache/semantic_cache.py) instead of pulling every candidate into Python and
+  # scanning — a real fix for the O(n) linear-scan limitation that module documented, not just a
+  # relabeling. Wire-compatible superset of plain Redis, so nothing else that talks to this container
+  # (e.g. Redis used for other future caching) needs to change.
   redis:
-    image: redis:7
+    image: redis/redis-stack-server:7.4.0-v3
     container_name: poc-redis
     ports:
       - "6379:6379"
@@ -70,6 +94,31 @@ services:
     volumes:
       - minio-data:/data
 
+  # Optional: one OpenAI-compatible gateway in front of every LLM backend this project talks to
+  # (local LM Studio + production Anthropic) — centralized rate limiting, per-key spend budgets, and
+  # model routing, distinct from what any single service's own LLMClient does. See
+  # litellm-gateway/config.yaml and litellm-gateway/README.md. Not started by a plain `docker compose
+  # up` (bring up explicitly with `--profile litellm`) since it's optional infrastructure, not
+  # required for the core RAG/agent path to work.
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: poc-litellm
+    profiles: ["litellm"]
+    ports:
+      - "4000:4000"
+    environment:
+      DATABASE_URL: postgresql://poc:poc123@postgres:5432/litellm
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-litellm-local-master-key}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - ./litellm-gateway/config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    depends_on:
+      - postgres
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # so the container can reach LM Studio on the host (macOS/Windows Docker Desktop already resolves this; Linux needs this line)
+
 volumes:
   postgres-data:
+  vecdb-data:
   minio-data:

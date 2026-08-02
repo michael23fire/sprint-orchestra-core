@@ -73,3 +73,6 @@ Thumbs.db
 # Synthetic data generators & artifacts (local; not part of FE/BE publish)
 codex/
 scripts/seed/
+
+# Local-only scratch: AWS spend/credentials-adjacent scripts, deliberately never committed
+local-only/
