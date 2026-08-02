@@ -1,0 +1,91 @@
+# LiteLLM Proxy: one OpenAI-compatible endpoint in front of multiple LLM backends.
+#
+# Why this exists on top of ai-service's own LLMClient abstraction (app/llm/): that one solves
+# "how does *this process* call whichever provider it's configured for" — a per-service concern.
+# A gateway solves a different, org-level problem: centralized rate limiting and spend budgets
+# *per caller* (not per service), model routing/fallback that can change without redeploying any
+# service, and one place to see total LLM spend across every service that talks to it — the actual
+# responsibility an AI Platform team owns, distinct from what any single service's client code does.
+#
+# "local vLLM" per the original ask was initially represented here by LM Studio
+# (host.docker.internal:1234) alone — this project's actual day-to-day local inference server (see
+# vectorization-service/ai-service READMEs for why: real tool-calling verified against it, no cloud
+# key needed for local dev). A real vLLM instance (`vllm-local` below) is now also stood up
+# (`vllm-server/`, see its README) and routed the identical way — same "point litellm_params.api_base
+# at any OpenAI-compatible server" pattern, only the URL and model differ. Deliberately CPU-only and a
+# tiny model (Qwen2.5-0.5B) here: this machine (Apple Silicon, no CUDA/ROCm) can't run vLLM's real
+# value proposition (PagedAttention + continuous batching on GPU) — the point of standing this up
+# locally is to prove the deployment and routing config are real, not to use it for actual local dev
+# (LM Studio's MLX backend stays the fast path for that). In a real cloud deployment this route would
+# point at a GPU-backed vLLM instance instead, which is where the concurrency/throughput story
+# `vllm-local`'s comment below actually applies.
+model_list:
+  - model_name: local-chat
+    litellm_params:
+      model: openai/qwen/qwen3.6-35b-a3b
+      api_base: http://host.docker.internal:1234/v1
+      api_key: "local"
+      # A local model genuinely costs $0 (electricity/amortized hardware, not a metered API bill —
+      # same convention as app/llm/pricing.py elsewhere in this project). A small notional price is
+      # assigned here ONLY so spend-budget enforcement (below) has something non-zero to actually
+      # test against locally, with no real Anthropic API key available in this environment to test
+      # against instead. Documented, not a claim that local inference costs money.
+      input_cost_per_token: 0.000003
+      output_cost_per_token: 0.000015
+
+  - model_name: local-embedding
+    litellm_params:
+      model: openai/text-embedding-qwen3-embedding-0.6b
+      api_base: http://host.docker.internal:1234/v1
+      api_key: "local"
+
+  - model_name: vllm-local
+    litellm_params:
+      # A real, running vLLM server (`vllm-server/`), not a stand-in — CPU-only on this hardware,
+      # so a tiny model (0.5B, not the 27B/35B class LM Studio serves for actual dev). On CUDA/ROCm
+      # GPU infra this same config, pointed at a bigger model, is where vLLM's continuous-batching
+      # concurrency actually pays off — the routing/gateway layer needs zero changes to get there,
+      # only the api_base host and model name.
+      model: openai/Qwen/Qwen2.5-0.5B-Instruct
+      api_base: http://host.docker.internal:8300/v1
+      api_key: "local"
+      input_cost_per_token: 0.000001
+      output_cost_per_token: 0.000002
+
+  - model_name: claude-production
+    litellm_params:
+      model: anthropic/claude-opus-4-8
+      # Same "empty is fine, resolved at call time" convention as the rest of this project
+      # (app/llm/anthropic_client.py) — no ANTHROPIC_API_KEY configured in this environment, so this
+      # route exists and is documented but has not been called live, same caveat as everywhere else.
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: openai-production
+    litellm_params:
+      # Real OpenAI cloud, not another OpenAI-*compatible* local server (that's what local-chat/
+      # local-embedding above already cover via LM Studio) — the actual managed-cloud route the
+      # "OpenAI/Azure/local vLLM" ask meant. Same untested-live caveat as claude-production: no
+      # OPENAI_API_KEY configured in this environment.
+      model: openai/gpt-5
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: azure-production
+    litellm_params:
+      # Azure OpenAI is a distinct backend from OpenAI proper, not the same thing pointed at a
+      # different URL: LiteLLM's `azure/<deployment_name>` model prefix (not `openai/...`) and its own
+      # required params (`api_base` = the resource endpoint, `api_version` = the Azure API version) —
+      # both mandatory here, unlike the OpenAI/Anthropic routes above. `<deployment_name>` is whatever
+      # name the model was deployed under in Azure AI Studio, not necessarily the underlying model's
+      # own name. Same untested-live caveat as the routes above: no Azure resource configured in this
+      # environment.
+      model: azure/<deployment_name>
+      api_base: os.environ/AZURE_OPENAI_ENDPOINT
+      api_version: "2024-08-01-preview"
+      api_key: os.environ/AZURE_OPENAI_API_KEY
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+
+litellm_settings:
+  drop_params: true  # tolerate a caller passing a param one backend doesn't support, instead of 400ing
