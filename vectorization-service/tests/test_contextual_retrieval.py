@@ -104,7 +104,17 @@ async def test_multi_chunk_source_gets_contextualized():
     await pipeline.handle_issue(_issue_msg(long_text))
 
     assert len(gen.calls) > 1  # one call per chunk
-    assert all(c.content.startswith("This chunk discusses word usage patterns.\n\n") for c in store.rows.values())
+    # Every chunk carries the contextual sentence. Chunk #0 starts with it directly — handle_issue
+    # prepends the issue's own key into the text before chunking, so chunk #0 already self-identifies
+    # and doesn't get the deterministic "[Issue X-1]" tag (see pipeline.py's _chunks). Chunk #1+ has
+    # lost that natural prefix past the split point, so it gets tagged ahead of the contextual
+    # sentence instead (see test_pipeline_idempotency.py's tagging tests for the isolated case).
+    chunks = sorted(store.rows.values(), key=lambda c: c.chunk_index)
+    assert chunks[0].content.startswith("This chunk discusses word usage patterns.\n\n")
+    assert all(
+        c.content.startswith("[Issue X-1]\nThis chunk discusses word usage patterns.\n\n")
+        for c in chunks[1:]
+    )
 
 
 async def test_context_generation_failure_falls_back_to_plain_chunk():

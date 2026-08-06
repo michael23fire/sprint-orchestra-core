@@ -52,8 +52,12 @@ class Settings(BaseSettings):
     embedding_max_retries: int = 3
 
     # --- Chunking ---
-    chunk_size_tokens: int = 500
-    chunk_overlap_tokens: int = 80
+    # 800/130 (~16% overlap), not the more common 500/80 default: a real ablation (300 vs 500 vs 800
+    # tokens, all 4 RAGAS metrics, judge=qwen2.5-72b-instruct, same 19-question set) found 800 winning
+    # on every metric for this corpus — see docs/RAG_ACCURACY_CASE_STUDIES.md. Attachments with tables/
+    # structured data are the likely reason: they fragment badly at smaller windows.
+    chunk_size_tokens: int = 800
+    chunk_overlap_tokens: int = 130
 
     # --- Contextual retrieval (Anthropic technique: https://www.anthropic.com/news/contextual-retrieval) ---
     # Off by default — it's an LLM call per chunk, only worth the cost/latency on multi-chunk sources
@@ -98,6 +102,48 @@ class Settings(BaseSettings):
     docling_do_ocr: bool = False  # OCR is slow; enable when attachments contain scans/screenshots
     docling_do_table_structure: bool = False
     attachment_max_bytes: int = 25 * 1024 * 1024  # skip binaries larger than this
+    # EasyOCR returns a per-detection confidence (0-1) that `_ocr_image_sync` used to discard
+    # entirely, joining every detection into one string regardless of confidence. Found live on a
+    # synthetically degraded (rotated/blurred/low-contrast/JPEG-recompressed) test image: real words
+    # ("62", "SKU", "WAREHOUSE") scored 0.7-1.0, while garbled fragments from the SAME image ("Mx",
+    # "Mfate", "Eot") scored 0.006-0.06 — a clean gap, not a fuzzy boundary. Worse than noise: the
+    # garbled "Mx" (the OCR's mangled read of "SKU:"+"Pallet") got confidently presented by the agent
+    # as a real SKU value, not flagged as uncertain — a runtime faithfulness check can't catch this
+    # class of error, because the answer WAS faithful to what got retrieved; the retrieved text itself
+    # was the problem. 0.4 sits in the clean gap between this test image's garbage (<=0.34) and real
+    # text (>=0.5) — not exhaustively tuned across image types, but a real improvement over "no
+    # threshold at all."
+    ocr_min_confidence: float = 0.4
+
+    # --- VLM fallback for images EasyOCR struggled with (app/ingest/vlm_describer.py) ---
+    # The confidence threshold above filters out garbled OCR fragments, but it can only turn "wrong"
+    # into "missing" — it can't recover the value. A vision-language model sees the whole image and
+    # can respond "this is illegible" instead of guessing a character sequence, which is the actual
+    # gap: see docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 27 (degraded-photo test) and Case Study 30
+    # (this fallback's own writeup).
+    #
+    # Off by default — a real LLM call per escalated image, same cost argument
+    # contextual_retrieval_enabled already makes. Only escalates when EasyOCR showed a concrete sign
+    # of struggling (some detections dropped as low-confidence, or nothing survived at all), not run
+    # unconditionally on every image.
+    vlm_ocr_enabled: bool = False
+    vlm_provider: str = "openai_compatible"  # anthropic | openai_compatible
+    vlm_anthropic_api_key: str = ""
+    vlm_anthropic_model: str = "claude-opus-4-8"  # needs vision; Haiku also supports it if cost matters more than accuracy here
+    vlm_openai_base_url: str = "https://api.openai.com/v1"
+    vlm_openai_api_key: str = ""
+    vlm_openai_model: str = "gpt-5.6-luna"
+    # A page of a scanned or visual-heavy PDF is rendered to PNG and sent to the same VLM only when
+    # Docling cannot produce useful page text. This is a separate opt-in because PDF page rendering
+    # can turn one attachment into several billable VLM calls.
+    vlm_pdf_enabled: bool = False
+    vlm_pdf_render_dpi: int = 200
+    vlm_pdf_max_pages: int = 12
+    vlm_pdf_min_text_chars: int = 80
+    # Also inspect pages with raster/vector visuals (charts, diagrams, image-only tables), even when
+    # they have some selectable text. Capped by `vlm_pdf_max_pages` above.
+    vlm_pdf_include_visual_pages: bool = True
+    vlm_max_completion_tokens: int = 2_000
 
 
 @lru_cache

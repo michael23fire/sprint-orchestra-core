@@ -95,6 +95,7 @@ def _issue_msg(event_type="issue_upserted") -> IssueIngestionMessage:
         description="<p>root cause was a connection pool leak</p>",
         issueType="bug",
         status="done",
+        priority="high",
         createdAt=datetime(2026, 1, 1, tzinfo=timezone.utc),
         updatedAt=datetime(2026, 1, 2, tzinfo=timezone.utc),
     )
@@ -129,6 +130,103 @@ async def test_issue_upsert_is_idempotent(pipeline):
     await pipe.handle_issue(_issue_msg())
     assert len(pipe._store.rows) == 1
     assert set(pipe._store.rows) == set(first)
+
+
+async def test_attachment_chunks_are_tagged_with_their_source_filename(pipeline):
+    # An attachment's parsed content (a CSV row, a PDF's body text) essentially never mentions its own
+    # filename or issue key naturally — found live, unlike issue text (which handle_issue prepends the
+    # key into before chunking). Contextual retrieval's LLM-written sentence is optional (off by
+    # default) so it can't be the only thing carrying this — this deterministic tag must fire for
+    # every attachment chunk, single- or multi-chunk, contextual retrieval on or off.
+    pipe, _ = pipeline
+    chunks = await pipe._chunks(
+        "Short attachment body.",
+        chunk_type="attachment", issue_id=1, issue_key="ATC-1", space_id=1, source_id=99,
+        key_prefix="attachment:99", source_label="report.pdf",
+    )
+    assert len(chunks) == 1
+    assert chunks[0].content.startswith("[Attachment: report.pdf — issue ATC-1]")
+    assert "Short attachment body." in chunks[0].content
+
+
+async def test_pdf_attachment_chunks_keep_structured_page_metadata_and_a_readable_prefix(pipeline):
+    pipe, _ = pipeline
+    chunks = await pipe._chunks(
+        "Invoice total: $42.",
+        chunk_type="attachment", issue_id=1, issue_key="ATC-1", space_id=1, source_id=99,
+        key_prefix="attachment:99", source_label="invoice.pdf", page_number=2,
+        force_numbered_ids=True,
+    )
+
+    assert len(chunks) == 1
+    assert chunks[0].id == "attachment:99#0"
+    assert chunks[0].page_number == 2
+    assert chunks[0].content.startswith("[Attachment: invoice.pdf — issue ATC-1 — PDF page 2]")
+
+
+async def test_attachment_chunks_keep_native_non_pdf_provenance(pipeline):
+    pipe, _ = pipeline
+    chunks = await pipe._chunks(
+        "Revenue by region.",
+        chunk_type="attachment", issue_id=1, issue_key="ATC-1", space_id=1, source_id=99,
+        key_prefix="attachment:99", source_label="revenue.xlsx",
+        provenance={"source_type": "xlsx", "sheet_name": "Q2 Revenue"},
+        force_numbered_ids=True,
+    )
+
+    assert chunks[0].page_number is None
+    assert chunks[0].provenance == {"source_type": "xlsx", "sheet_name": "Q2 Revenue"}
+    assert chunks[0].content.startswith(
+        "[Attachment: revenue.xlsx — issue ATC-1 — XLSX sheet Q2 Revenue]"
+    )
+
+
+async def test_comment_chunks_are_always_tagged_even_the_first_one(pipeline):
+    # Found live: unlike issue text, a comment's raw text (html_to_text(msg.content)) has NO issue_key
+    # prefix at all — confirmed against a real comment in the corpus, chunk #0 read as plain prose with
+    # zero mention of which issue it's on. So comments are tagged unconditionally, not just past
+    # chunk #0 (contrast with the issue case below).
+    pipe, _ = pipeline
+    chunks = await pipe._chunks(
+        "The fix landed in the retry handler.",
+        chunk_type="comment", issue_id=1, issue_key="ATC-1", space_id=1, source_id=5,
+        key_prefix="comment:5",
+    )
+    assert len(chunks) == 1
+    assert chunks[0].content == "[Comment on ATC-1]\nThe fix landed in the retry handler."
+
+
+async def test_issue_chunk_zero_is_not_tagged_but_later_chunks_are():
+    # handle_issue prepends f"{issue_key} {body}" into the text BEFORE chunking (see handle_issue), so
+    # chunk #0 always naturally starts with its own key already — tagging it too would be pure
+    # redundant noise. But chunk #1+ (past the split point) has lost that natural prefix — found live,
+    # ATC-43's own body is long enough to produce exactly this case in the real corpus. Force a split
+    # here with a small chunk_size so the test doesn't depend on a huge fixture string.
+    settings = Settings(embedding_provider="fake", embedding_dim=8, chunk_size_tokens=10, chunk_overlap_tokens=2)
+    pipe = IngestPipeline(settings, FakeEmbedder(settings.embedding_dim), InMemoryStore())
+    long_text = "ATC-1 " + " ".join(f"word{i}" for i in range(40))
+
+    chunks = await pipe._chunks(
+        long_text,
+        chunk_type="issue", issue_id=1, issue_key="ATC-1", space_id=1, source_id=1,
+        key_prefix="issue:1",
+    )
+
+    assert len(chunks) > 1
+    assert not chunks[0].content.startswith("[Issue ATC-1]")
+    assert all(c.content.startswith("[Issue ATC-1]") for c in chunks[1:])
+
+
+async def test_sprint_chunks_are_always_tagged(pipeline):
+    # A sprint's goal text (html_to_text(msg.goal)) has no sprint_name prefix either — same gap as
+    # comments, for the same reason (see handle_sprint: the goal is embedded on its own).
+    pipe, _ = pipeline
+    chunks = await pipe._chunks(
+        "Make the storefront accessible and observable.",
+        chunk_type="sprint", issue_id=70, issue_key="Sprint 7", space_id=1, source_id=70,
+        key_prefix="sprint:70",
+    )
+    assert chunks[0].content == "[Sprint Sprint 7]\nMake the storefront accessible and observable."
 
 
 async def test_html_is_stripped_before_storing(pipeline):
@@ -209,6 +307,12 @@ async def test_issue_upsert_records_structured_metadata(pipeline):
     assert meta.issue_type == "bug"
     assert meta.status == "done"
     assert meta.title == "Payment service outage"
+    # Regression guard: priority must be carried on the upsert path itself, not rely solely on the
+    # history-stream self-heal (see append_issue_change's "priority" branch) — most issues have
+    # their priority set once at creation and never changed again, so a history-only sync would
+    # never observe the initial value at all. Found live against real AtlasCart data before this
+    # field was added here (docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 23's follow-up).
+    assert meta.priority == "high"
 
 
 async def test_blank_issue_still_records_metadata_so_it_is_counted(pipeline):
@@ -262,16 +366,19 @@ async def test_history_event_appends_change_and_refreshes_snapshot_status(pipeli
 
 
 async def test_history_event_appends_change_and_refreshes_snapshot_priority(pipeline):
-    # Same self-heal as status above, for priority: a priority-only edit never fires a content event
-    # either (priority isn't embedded text), so this history stream is the only way the snapshot
-    # learns about it. See migrations/008 and VectorStore.append_issue_change's "priority" branch.
+    # A priority-only edit never fires a content event either (priority isn't embedded text), so this
+    # history stream is what keeps the snapshot current for a LATER edit — the initial value at
+    # creation comes from the upsert path instead (see test_issue_upsert_records_structured_metadata),
+    # since most issues get their priority set once and never changed again. Both paths are exercised
+    # here: upsert sets the initial "high", then a genuine edit changes it to "urgent".
+    # See migrations/008 and VectorStore.append_issue_change's "priority" branch.
     pipe, _ = pipeline
-    await pipe.handle_issue(_issue_msg())  # snapshot starts with priority unset
-    assert pipe._store.issues[42].priority is None
-    await pipe.handle_history(_history_msg(field="priority", from_v="medium", to_v="high"))
+    await pipe.handle_issue(_issue_msg())  # snapshot starts at priority="high" via the upsert path
+    assert pipe._store.issues[42].priority == "high"
+    await pipe.handle_history(_history_msg(field="priority", from_v="high", to_v="urgent"))
 
     assert 900 in pipe._store.changes
-    assert pipe._store.issues[42].priority == "high"
+    assert pipe._store.issues[42].priority == "urgent"
 
 
 async def test_history_event_is_idempotent_on_history_id(pipeline):

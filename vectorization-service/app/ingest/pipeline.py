@@ -14,9 +14,10 @@ from app.db.vector_store import VectorStore
 from app.ingest.attachment_fetcher import fetch_attachment
 from app.ingest.chunker import chunk_text
 from app.ingest.contextualizer import ContextGenerator, NoopContextGenerator
-from app.ingest.docling_parser import parse_attachment
+from app.ingest.docling_parser import parse_attachment_sections
 from app.ingest.embedder import Embedder
 from app.ingest.html_text import html_to_text
+from app.ingest.vlm_describer import NoopVlmImageDescriber, VlmImageDescriber
 from app.models import (
     AttachmentIngestionMessage,
     Chunk,
@@ -38,13 +39,19 @@ class IngestPipeline:
         embedder: Embedder,
         store: VectorStore,
         context_generator: ContextGenerator | None = None,
+        vlm_describer: VlmImageDescriber | None = None,
     ):
         self._settings = settings
         self._embedder = embedder
         self._store = store
         self._context_generator = context_generator or NoopContextGenerator()
+        self._vlm_describer = vlm_describer or NoopVlmImageDescriber()
 
-    async def _chunks(self, text: str, *, chunk_type, issue_id, issue_key, space_id, source_id, key_prefix) -> List[Chunk]:
+    async def _chunks(
+        self, text: str, *, chunk_type, issue_id, issue_key, space_id, source_id, key_prefix,
+        source_label: str | None = None, page_number: int | None = None,
+        provenance: dict | None = None, chunk_index_offset: int = 0, force_numbered_ids: bool = False,
+    ) -> List[Chunk]:
         pieces = chunk_text(
             text, self._settings.chunk_size_tokens, self._settings.chunk_overlap_tokens
         )
@@ -55,16 +62,57 @@ class IngestPipeline:
             # IS its own context, so there's nothing to situate it within. See contextualizer.py.
             if self._settings.contextual_retrieval_enabled and len(pieces) > 1:
                 content = await self._contextualize(text, piece, issue_key, i)
+            # Deterministic source tag, independent of contextual retrieval: a chunk read in isolation
+            # needs some way to say which source it came from, and whether it already has one depends
+            # entirely on what the ORIGINAL text looked like before splitting:
+            #   - issue: handle_issue prepends f"{issue_key} {body}" into the text BEFORE chunking, so
+            #     chunk #0 always naturally starts with its own key — but chunk #1+ (past the split
+            #     point) has lost that prefix. Found live: ATC-43's own body is long enough to produce
+            #     exactly this case in this corpus.
+            #   - comment/sprint: the raw text (html_to_text(msg.content) / html_to_text(msg.goal)) has
+            #     NO issue_key/sprint_name prefix at all — confirmed live, a real comment's chunk #0
+            #     reads as plain prose with zero mention of which issue it's on. This is true for EVERY
+            #     comment, not just multi-chunk ones.
+            #   - attachment: parsed file content (a CSV row, a PDF's body text) essentially never
+            #     mentions its own filename or issue key naturally, chunk #0 included.
+            # So: attachment and comment/sprint chunks are tagged unconditionally; issue chunks only
+            # past chunk #0, where the source text's own natural prefix no longer reaches. Contextual
+            # retrieval's LLM-written sentence is optional (off by default) so it can't be the only
+            # thing carrying this — this costs nothing (no LLM call) and always fires where needed.
+            if chunk_type == "attachment" and source_label:
+                location = provenance or {}
+                if page_number is not None:
+                    location_label = f"PDF page {page_number}"
+                elif location.get("slide_number") is not None:
+                    location_label = f"PPTX slide {location['slide_number']}"
+                elif location.get("sheet_name"):
+                    cell_range = f" ({location['cell_range']})" if location.get("cell_range") else ""
+                    location_label = f"XLSX sheet {location['sheet_name']}{cell_range}"
+                elif location.get("page_number") is not None:
+                    location_label = f"DOCX page {location['page_number']}"
+                else:
+                    location_label = ""
+                location_suffix = f" — {location_label}" if location_label else ""
+                content = f"[Attachment: {source_label} — issue {issue_key}{location_suffix}]\n{content}"
+            elif chunk_type == "comment":
+                content = f"[Comment on {issue_key}]\n{content}"
+            elif chunk_type == "sprint":
+                content = f"[Sprint {issue_key}]\n{content}"
+            elif chunk_type == "issue" and i > 0:
+                content = f"[Issue {issue_key}]\n{content}"
             chunks.append(
                 Chunk(
-                    id=f"{key_prefix}#{i}" if len(pieces) > 1 else key_prefix,
+                    id=(f"{key_prefix}#{chunk_index_offset + i}"
+                        if force_numbered_ids or len(pieces) > 1 else key_prefix),
                     chunk_type=chunk_type,
                     issue_id=issue_id,
                     issue_key=issue_key,
                     space_id=space_id,
                     source_id=source_id,
-                    chunk_index=i,
+                    chunk_index=chunk_index_offset + i,
                     content=content,
+                    page_number=page_number,
+                    provenance=provenance or {},
                 )
             )
         return chunks
@@ -106,6 +154,7 @@ class IngestPipeline:
                 space_id=msg.space_id,
                 issue_type=msg.issue_type,
                 status=msg.status,
+                priority=msg.priority,
                 # The message carries current sprint membership (IssueIngestionMessage.sprint_id/
                 # sprint_name); forward it, or the /issues/query sprint_ids/sprint_names filter — the
                 # whole "how many issues in sprint N" path — sees NULL for every issue and answers 0.
@@ -272,16 +321,41 @@ class IngestPipeline:
         data = await fetch_attachment(self._settings, msg.storage_uri, msg.bucket, msg.storage_key)
         if not data:
             return
-        text = await parse_attachment(data, msg.filename or "attachment", self._settings)
-        chunks = await self._chunks(
-            text,
-            chunk_type="attachment",
-            issue_id=msg.issue_id,
-            issue_key=msg.issue_key,
-            space_id=msg.space_id,
-            source_id=msg.attachment_id,
-            key_prefix=f"attachment:{msg.attachment_id}",
+        # Kafka metadata is a useful early rejection, but it is producer-supplied. Check fetched
+        # bytes too before parsing/rendering so a malformed message cannot make PDF VLM processing
+        # exceed the configured attachment bound.
+        if len(data) > self._settings.attachment_max_bytes:
+            logger.info(
+                "fetched attachment too large; skipping",
+                extra={"attachment_id": msg.attachment_id, "byte_size": len(data)},
+            )
+            return
+        sections = await parse_attachment_sections(
+            data, msg.filename or "attachment", self._settings, self._vlm_describer
         )
+        chunks = []
+        chunk_index_offset = 0
+        # Number every section-derived attachment chunk deterministically. This matters for a PDF
+        # where page 2 and page 3 can each be short one-chunk sections; without the offset both
+        # would otherwise claim `attachment:{id}` and overwrite one another.
+        force_numbered_ids = len(sections) > 1 or any(s.page_number is not None for s in sections)
+        for section in sections:
+            section_chunks = await self._chunks(
+                section.content,
+                chunk_type="attachment",
+                issue_id=msg.issue_id,
+                issue_key=msg.issue_key,
+                space_id=msg.space_id,
+                source_id=msg.attachment_id,
+                key_prefix=f"attachment:{msg.attachment_id}",
+                source_label=msg.filename,
+                page_number=section.page_number,
+                provenance=section.provenance,
+                chunk_index_offset=chunk_index_offset,
+                force_numbered_ids=force_numbered_ids,
+            )
+            chunks.extend(section_chunks)
+            chunk_index_offset += len(section_chunks)
         await self._replace("attachment", msg.attachment_id, chunks)
         logger.info(
             "attachment upserted",

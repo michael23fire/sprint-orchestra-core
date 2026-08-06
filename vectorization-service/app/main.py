@@ -20,6 +20,8 @@ from app.db.vector_store import VectorStore
 from app.ingest.contextualizer import build_context_generator
 from app.ingest.embedder import build_embedder
 from app.ingest.pipeline import IngestPipeline
+from app.ingest.vlm_cache import CachedVlmImageDescriber
+from app.ingest.vlm_describer import build_vlm_describer, vlm_cache_namespace
 from app.kafka.consumer import IngestionConsumer
 from app.logging_config import configure_logging
 from app.observability import ObservabilityMiddleware, metrics_response
@@ -37,7 +39,16 @@ async def lifespan(app: FastAPI):
     embedder = build_embedder(settings)
     context_generator = build_context_generator(settings)
     store = VectorStore(pool)
-    pipeline = IngestPipeline(settings, embedder, store, context_generator)
+    raw_vlm_describer = build_vlm_describer(settings)
+    # The cache is intentionally wrapped at the service boundary, not inside parsing: a successful
+    # VLM response is persisted before the later embedding/vector-store steps can fail, so Kafka
+    # redelivery after a crash reuses it rather than issuing another paid model call.
+    vlm_describer = (
+        CachedVlmImageDescriber(raw_vlm_describer, store, vlm_cache_namespace(settings))
+        if settings.vlm_ocr_enabled
+        else raw_vlm_describer
+    )
+    pipeline = IngestPipeline(settings, embedder, store, context_generator, vlm_describer)
     consumer = IngestionConsumer(settings, pipeline)
     reranker = build_reranker(settings)
 
@@ -55,6 +66,7 @@ async def lifespan(app: FastAPI):
         await consumer.stop()
         await embedder.aclose()
         await context_generator.aclose()
+        await vlm_describer.aclose()
         await pool.close()
         logger.info("stopped %s", settings.service_name)
 

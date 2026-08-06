@@ -5,9 +5,9 @@ models accept camelCase via an alias generator while exposing snake_case attribu
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Literal, Optional
+from typing import List, Literal, NotRequired, Optional, TypedDict
 
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
@@ -32,6 +32,13 @@ class IssueIngestionMessage(_CamelModel):
     # producer is extended (or a backfill fills them from source). See migrations/004.
     issue_type: Optional[str] = None
     status: Optional[str] = None
+    # Carried here (not just self-healed via the history stream) specifically because priority is
+    # commonly set once at issue creation and never changed again — a history-only sync would never
+    # observe that initial value, only later edits. Found live: every AtlasCart issue's priority
+    # showed NULL in the structured metadata table despite jira-backend having real values, because
+    # this field wasn't in the producer's payload yet — see migrations/008 and
+    # docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 23's follow-up.
+    priority: Optional[str] = None
     # Which sprint the issue is CURRENTLY in — null means backlog (no sprint), not "unknown"; jira-
     # backend sends both the id (for filtering) and the name (for display without a second lookup).
     sprint_id: Optional[int] = None
@@ -130,6 +137,19 @@ class AttachmentIngestionMessage(_CamelModel):
 ChunkType = Literal["issue", "comment", "attachment", "sprint"]
 
 
+class AttachmentProvenance(TypedDict, total=False):
+    """Static schema for format-native attachment locators stored in chunks.provenance JSONB."""
+
+    source_type: str
+    page_number: NotRequired[int]
+    slide_number: NotRequired[int]
+    sheet_name: NotRequired[str]
+    cell_range: NotRequired[str]
+    bbox: NotRequired[List[float]]
+    coordinate_system: NotRequired[str]
+    extraction: NotRequired[str]
+
+
 @dataclass(slots=True)
 class SearchHit:
     """One ranked retrieval result, returned by VectorStore.search_* and the /search endpoint.
@@ -147,6 +167,11 @@ class SearchHit:
     content: str
     score: float
     retrievers: List[str]
+    # Null for sources without a page concept, and for legacy/Docling-only PDF chunks whose page
+    # boundary was not available. PDF VLM page chunks carry a real, 1-based source page number.
+    page_number: Optional[int] = None
+    # Format-specific source locator, e.g. slide_number, sheet_name/cell_range, or image bbox.
+    provenance: AttachmentProvenance = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -163,9 +188,9 @@ class IssueMetadata:
     space_id: int
     issue_type: Optional[str] = None
     status: Optional[str] = None
-    # Null until a priority field_change history event self-heals it (see migrations/008 and
-    # VectorStore.append_issue_change) — not carried by IssueIngestionMessage itself, same "nullable
-    # until the producer emits it or a history event self-heals it" convention as status/sprint above.
+    # Set from IssueIngestionMessage on every upsert (the initial-value path — see that model's
+    # docstring for why priority specifically needed this, unlike status/sprint) AND self-healed via
+    # the history stream for later edits (migrations/008, VectorStore.append_issue_change).
     priority: Optional[str] = None
     sprint_id: Optional[int] = None
     sprint_name: Optional[str] = None
@@ -334,6 +359,38 @@ class IssueDetailsQueryResult:
 
 
 @dataclass(slots=True)
+class IssueAttachment:
+    """One attachment chunk, returned complete and unranked — not a semantic-search hit.
+
+    The `chunk_type='attachment'` counterpart to `IssueComment`/`IssueDetail`. Exists for the same
+    reason: a semantic/hybrid query has no way to phrase a search for a specific fact (an exact SKU,
+    an ID) it doesn't already know — found live asking "what SKU does ATC-46's attached document use"
+    repeatedly returned different results (sometimes found, sometimes abstained) purely based on how
+    the agent happened to phrase its search query that turn, even though a direct lexical-mode search
+    for the exact value always found it. Once the agent already knows which issue's attachment it
+    needs (the question always names it), this makes that lookup deterministic instead of a guess.
+    """
+
+    id: str
+    issue_id: int
+    issue_key: str
+    source_id: int
+    content: str
+    chunk_index: int
+    page_number: Optional[int] = None
+    provenance: AttachmentProvenance = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class IssueAttachmentsQueryResult:
+    """Aggregate + list result of a get_issue_attachments fetch: exact count plus every attachment
+    chunk (up to `limit`) for the requested issues, ordered by issue then chunk_index."""
+
+    total_count: int
+    attachments: List[IssueAttachment]
+
+
+@dataclass(slots=True)
 class IssueQueryResult:
     """Aggregate + list result of a structured issue query. ``total_count`` counts every match
     (ignoring the row `limit`); ``counts_by_type`` / ``counts_by_status`` break that total down; and
@@ -370,3 +427,9 @@ class Chunk:
     source_id: int
     chunk_index: int
     content: str
+    # Source-document page, deliberately distinct from `chunk_index`: a long PDF page can yield
+    # several chunks with the same page_number, while the chunk index stays unique per attachment.
+    page_number: Optional[int] = None
+    # Typed, format-native source locator serialized as JSONB in the vector store. Keep page_number
+    # as a first-class PDF filter/index; this object carries slide/sheet/range/bbox metadata.
+    provenance: AttachmentProvenance = field(default_factory=dict)

@@ -86,6 +86,14 @@ class OpenAICompatibleContextGenerator:
             json={
                 "model": self._model,
                 "max_tokens": 100,
+                # Found live: several local reasoning-capable models (qwen3.5-9b, gemma-4-31b) spend
+                # their entire max_tokens budget on hidden `reasoning_content` and never emit anything
+                # in `content` for this simple a task — finish_reason="length" with content="" every
+                # time, silently no-opping every contextualization call (pipeline.py's `_contextualize`
+                # treats empty context as "nothing to prepend", not an error, so this failed with no
+                # warning logged at all). `reasoning_effort: "none"` skips the hidden reasoning pass
+                # entirely for a one-sentence task that doesn't need it.
+                "reasoning_effort": "none",
                 "messages": [{"role": "user", "content": _PROMPT_TEMPLATE.format(document=document, chunk=chunk)}],
             },
         )

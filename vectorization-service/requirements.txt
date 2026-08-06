@@ -22,12 +22,17 @@ anthropic==0.42.0  # contextual retrieval (app/ingest/contextualizer.py); off by
 # --- Attachments (object storage + document parsing) ---
 boto3==1.35.90
 docling==2.14.0
+openpyxl==3.1.5  # native worksheet names/ranges for typed XLSX provenance
 # Both already ship transitively with docling, but standalone-image attachments now call them
 # directly (app/ingest/docling_parser.py) rather than only through Docling's own pipeline, so they're
 # declared as direct dependencies here too — relying on another package's transitive deps staying the
 # same across docling version bumps would be fragile.
 easyocr==1.7.2
 Pillow==11.0.0
+# Render only selected low-quality PDF pages to PNG before sending them to the VLM.  Keeping this a
+# direct dependency makes PDF fallback work in the production image rather than accidentally relying
+# on Docling's transitive packages.
+PyMuPDF==1.24.14
 
 # --- Reranking (optional, VEC_RERANK_ENABLED=true; app/db/reranker.py) ---
 sentence-transformers==3.3.1
