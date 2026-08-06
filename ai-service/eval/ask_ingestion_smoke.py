@@ -54,7 +54,7 @@ GT = {
     "only_blocked_issue": "ATC-77",     # the sole blocked issue — catalog caching, NOT checkout
     "double_click_bug": "ATC-43",       # "Checkout can create two orders from a double click"
     "last_completed_sprint_points": 37, # Sprint 6 completed_points; goal mentions "catalog"/"import"
-    "most_recent_issue": "ATC-77",      # max(updated_at)
+    "most_recent_issue": "ATC-79",      # max(updated_at) — re-verified 2026-08-03 against jira-backend
     "latest_sprint_goal_words": ["accessible", "observable", "beta"],  # Sprint 7 goal
     "active_sprint_issue_count": 8,     # Sprint 7 has 8 issues (after the sprint_id backfill)
     # ATC-68's reopen field_change carries the reason in its OWN `description` column (not a comment)
@@ -63,6 +63,41 @@ GT = {
     # ATC-30's reason lives ONLY in a comment (its field_change description is a bare "Updated
     # status") — the case get_issue_comments (Plan B) exists for.
     "atc30_reopen_reason_words": ["browser", "twice"],
+    # ATC-43's real subtasks (parent_key relationship, structured — see EVAL_GOLDEN_SET_TAXONOMY.md's
+    # "known gap" #1: RAGAS already covers this, smoke test didn't until now). ATC-46 is a RELATED
+    # issue under the same parent epic, not a subtask of ATC-43 — a wrong answer here would name it too.
+    "atc43_subtasks": ["ATC-44", "ATC-45", "ATC-47"],
+    # ATC-46's attached PDF (inventory-correction-requirement.pdf, Docling-parsed -> chunk_type=
+    # attachment) is the ONLY place this SKU appears — not in the issue body or any comment.
+    "atc46_attachment_sku": "A-104",
+    # ATC-20's attached CSV (invalid-price-reproduction.csv) — a second file type (plain-text/table
+    # CSV, no OCR involved), ground truth only in the reproduction table.
+    "atc20_attachment_sku": "D-402",
+    "atc20_attachment_row": "19",
+    # ATC-27's attached XLSX (stock-concurrency-results.xlsx, Docling table-structure parse) — a
+    # third file type, ground truth only in the results table.
+    "atc27_attachment_lock_ms": "138",
+    # ATC-13's attached Markdown (product-detail-api-contract.md) — a fourth file type. The issue body
+    # describes the endpoint generically; the exact stock number and 404 error code are only in the
+    # attached HTTP contract examples.
+    "atc13_attachment_stock": "4",
+    "atc13_attachment_404_code": "PRODUCT_NOT_FOUND",
+    # ATC-59's attached .log (cart-merge-doubles-a-matching-sku-diagnostic.log) — a fifth file type
+    # (plain-text log, decoded directly, no Docling/OCR involved). guest_token is a log-only field —
+    # the issue body's narrative covers the user-facing bug story but not this internal token.
+    "atc59_attachment_guest_token": "gt_7f2",
+    # ATC-15's attached PNG (missing-image-ac1-before.png), OCR'd via EasyOCR. Deliberately testing on
+    # the PRICE, not the product-name text: OCR noise on this fixture reads "Oak" as "QAK" and "Slow
+    # 3G" as "SLON 36", but numbers/prices come through reliably — this is the standard practice for
+    # noisy-OCR eval (grade on the robust signal, not brittle exact-text match on the noisy parts).
+    # The issue body never states this price at all.
+    "atc15_attachment_price": "28.00",
+    # Second examples per format (a single passing case per format could be a lucky coincidence of
+    # that one issue's phrasing; a second, different issue/fact closes that gap).
+    "atc73_attachment_rejected": "2",
+    "atc68_attachment_error_code": "order_link_reference_mismatch",
+    "atc63_attachment_actor": "operations",
+    "atc56_attachment_expected": "x4",
 }
 
 # --- HTTP client (stdlib) -----------------------------------------------------------------------
@@ -138,7 +173,7 @@ class Question:
 
 
 # --- The battery --------------------------------------------------------------------------------
-# 17 questions, each targeting a distinct code path / content type. Grouped by what they prove.
+# 28 questions, each targeting a distinct code path / content type. Grouped by what they prove.
 
 QUESTIONS: List[Question] = [
     # A. Ingestion completeness — the real "is it good enough" gates -----------------------------
@@ -327,6 +362,155 @@ QUESTIONS: List[Question] = [
                 "turn 2 must NOT abstain and must state both ATC-68's and ATC-30's actual reasons "
                 f"({GT['atc68_reopen_reason_words']} / {GT['atc30_reopen_reason_words']})",
             ),
+        ),
+    ),
+    # Attachment content — regression guard for a real gap found live: attachment parsing/embedding
+    # code existed and was wired in, but zero attachment chunks were actually in the index (Kafka
+    # ingestion flag off; the one-time backfill of pre-existing files silently no-opped because
+    # boto3/docling weren't installed in the venv despite being pinned in requirements.txt). PASS here
+    # requires the ONE fact this SKU exists only inside a parsed PDF, never in issue/comment text.
+    # Phrasing note: found live that this question is genuinely sensitive to exact wording — a longer,
+    # more verbose phrasing ("In the inventory correction requirement document attached to ATC-46,
+    # what SKU...") reliably drove the model into a 4-round chain of natural-language semantic queries
+    # that never scored the attachment chunk highly enough (hybrid/vector ranking struggles with an
+    # exact alphanumeric code it doesn't know in advance), while this terser phrasing consistently
+    # nudges it toward a lexical-friendly query that finds it. Retrieval itself is not flaky — a direct
+    # lexical-mode /search for "A-104" finds the chunk every time — this is LLM tool-query-generation
+    # variance for a needle-in-haystack exact-value fact, not a data or ranking bug.
+    Question(
+        18, "attachment-content",
+        "ATC-46 attachment worked example: what SKU and order reference does it use?",
+        f"states SKU {GT['atc46_attachment_sku']} and order reference BETA-1043 — both only exist "
+        "inside the attached PDF's parsed text (chunk_type=attachment), nowhere else in the corpus.",
+        lambda r: (
+            (not r.abstained) and _has(r.answer, GT["atc46_attachment_sku"], "beta-1043"),
+            f"expected SKU {GT['atc46_attachment_sku']} + order BETA-1043 from the attachment",
+        ),
+    ),
+    # A second file type: CSV (plain-text/table parse, no OCR). Ground truth is in the reproduction
+    # table only — the issue body names row 18 (blank price), not row 19 (negative price).
+    Question(
+        19, "attachment-content-csv",
+        "ATC-20 attachment reproduction data: which SKU has a negative input price, and what row "
+        "number is it?",
+        f"states SKU {GT['atc20_attachment_sku']} and row {GT['atc20_attachment_row']} — both only "
+        "exist inside the attached CSV, nowhere else in the corpus (the issue body only names row 18).",
+        lambda r: (
+            (not r.abstained)
+            and _has(r.answer, GT["atc20_attachment_sku"])
+            and _has(r.answer, GT["atc20_attachment_row"]),
+            f"expected SKU {GT['atc20_attachment_sku']} + row {GT['atc20_attachment_row']}",
+        ),
+    ),
+    # A third file type: XLSX (Docling table-structure parse). Ground truth is a specific numeric
+    # result buried in a 5-row test table, not summarized anywhere in the issue's own text.
+    Question(
+        20, "attachment-content-xlsx",
+        "ATC-27 attachment concurrency results: what was the lock-release time in ms for run 4, and "
+        "what happened in that run?",
+        f"states {GT['atc27_attachment_lock_ms']} ms and that the first request timed out while the "
+        "second succeeded — both only exist inside the attached XLSX's results table.",
+        lambda r: (
+            (not r.abstained) and _has(r.answer, GT["atc27_attachment_lock_ms"]),
+            f"expected lock-release time {GT['atc27_attachment_lock_ms']} ms",
+        ),
+    ),
+    # A fourth file type: Markdown (plain-text parse, no OCR/table-structure involved).
+    Question(
+        21, "attachment-content-markdown",
+        "ATC-13 attached API contract: what stock value is returned for the active SKU example, and "
+        "what error code is returned for an unknown SKU?",
+        f"states stock {GT['atc13_attachment_stock']} and error code {GT['atc13_attachment_404_code']} "
+        "— both only exist inside the attached Markdown's HTTP examples, nowhere else in the corpus.",
+        lambda r: (
+            (not r.abstained)
+            and _has(r.answer, GT["atc13_attachment_stock"])
+            and _has(r.answer, GT["atc13_attachment_404_code"]),
+            f"expected stock {GT['atc13_attachment_stock']} + code {GT['atc13_attachment_404_code']}",
+        ),
+    ),
+    # A fifth file type: plain-text .log (direct UTF-8 decode, no parser library involved at all).
+    Question(
+        22, "attachment-content-log",
+        "ATC-59 attached diagnostic log: what is the guest_token value logged?",
+        f"states {GT['atc59_attachment_guest_token']} — this internal token only exists inside the "
+        "attached log, not in the issue's own bug-report narrative.",
+        lambda r: (
+            (not r.abstained) and _has(r.answer, GT["atc59_attachment_guest_token"]),
+            f"expected guest_token {GT['atc59_attachment_guest_token']}",
+        ),
+    ),
+    # PNG screenshot, OCR'd via EasyOCR — deliberately graded on the price (a robust OCR signal), not
+    # the garbled product-name text (see GT's comment on this fixture).
+    Question(
+        23, "attachment-content-png-ocr",
+        "ATC-15 attached screenshot (before state): what price is shown for the item?",
+        f"states {GT['atc15_attachment_price']} — this exact price is never stated in the issue body, "
+        "only visible in the OCR'd screenshot text.",
+        lambda r: (
+            (not r.abstained) and _has(r.answer, GT["atc15_attachment_price"]),
+            f"expected price {GT['atc15_attachment_price']}",
+        ),
+    ),
+    # --- Second examples per attachment format — a single passing case per format could be a lucky
+    # coincidence of that one issue's phrasing; these use a different issue/fact per format. ---
+    Question(
+        24, "attachment-content-csv-2",
+        "ATC-73 attached background-import-run.csv: how many rows were rejected during the 'failed' "
+        "phase?",
+        f"states {GT['atc73_attachment_rejected']} — only in the CSV's phase-by-phase table, not the "
+        "issue body.",
+        lambda r: (
+            (not r.abstained) and _has(r.answer, GT["atc73_attachment_rejected"]),
+            f"expected {GT['atc73_attachment_rejected']} rejected",
+        ),
+    ),
+    Question(
+        25, "attachment-content-log-2",
+        "ATC-68 attached diagnostic log: what error code is logged?",
+        f"states {GT['atc68_attachment_error_code']} — the issue body tells the BETA-1128/BETA-1123 "
+        "story but never states this internal error code, only the log does.",
+        lambda r: (
+            (not r.abstained) and _has(r.answer, GT["atc68_attachment_error_code"]),
+            f"expected error code {GT['atc68_attachment_error_code']}",
+        ),
+    ),
+    Question(
+        26, "attachment-content-pdf-2",
+        "ATC-63 attached beta order state model: who is the actor for the transition from "
+        "'cancelled' to 'refund pending'?",
+        f"states {GT['atc63_attachment_actor']} — only in the PDF's transition table, not the issue "
+        "body (which only asks that transitions name an actor, without naming one itself).",
+        lambda r: (
+            (not r.abstained) and _has(r.answer, GT["atc63_attachment_actor"]),
+            f"expected actor {GT['atc63_attachment_actor']}",
+        ),
+    ),
+    Question(
+        27, "attachment-content-xlsx-2",
+        "ATC-56 attached guest-cart-merge-matrix: what is the expected result for the 'Stock limit' "
+        "test case?",
+        f"states {GT['atc56_attachment_expected']} (quantity capped at available stock, with an "
+        "explanatory note) — only in the matrix, not the issue body.",
+        lambda r: (
+            (not r.abstained) and _has(r.answer, GT["atc56_attachment_expected"]),
+            f"expected result containing {GT['atc56_attachment_expected']}",
+        ),
+    ),
+    # Epic/subtask relationship (parent_key) — RAGAS already covers this (subtask list + epic-of x2),
+    # smoke test didn't until now (see EVAL_GOLDEN_SET_TAXONOMY.md's "known gap" #1). ATC-46 is a
+    # related issue under the same parent epic (ATC-4), NOT a subtask of ATC-43 — naming it here would
+    # be a false positive, the same class of mistake Case Study 17/18 already found and fixed.
+    Question(
+        28, "structured-relationship-subtasks",
+        "Which issues are the real subtasks of ATC-43?",
+        f"names exactly {GT['atc43_subtasks']} — and does NOT include ATC-46, which is a related "
+        "issue under the same parent epic, not a subtask of ATC-43.",
+        lambda r: (
+            (not r.abstained)
+            and _has_all(r.answer, GT["atc43_subtasks"])
+            and not _has(r.answer, "ATC-46 is a subtask", "ATC-46, a subtask"),
+            f"expected exactly {GT['atc43_subtasks']}, and ATC-46 not asserted as a subtask",
         ),
     ),
 ]

@@ -89,6 +89,16 @@ CASES: List[RagasCase] = [
         "matching SKU's quantity, because the merge callback runs twice instead of once.",
     ),
     RagasCase(
+        # Sprint-goal semantic search (chunk_type=sprint) — RAGAS had no case for this content type at
+        # all before (only structured sprint queries); ask_ingestion_smoke.py's sprint-goal-semantic
+        # case tests Sprint 7 specifically, so this uses a different sprint (4) to avoid just
+        # re-verifying the same cached match.
+        "Which sprint's goal was about letting returning shoppers keep their guest cart after "
+        "signing in?",
+        "AtlasCart Sprint 4's goal was to let returning beta shoppers sign in without losing their "
+        "guest cart.",
+    ),
+    RagasCase(
         "Is there any blocked issue in the workspace, and what is it about?",
         "Yes — ATC-77 ('Cache the public product catalog safely') is the only blocked issue. It is "
         "about caching the public product catalog, not related to checkout or payments.",
@@ -106,6 +116,87 @@ CASES: List[RagasCase] = [
         "There is no information about this in the knowledge base — this workspace contains no "
         "financial, cost, or AWS billing data.",
     ),
+    RagasCase(
+        "Count the issues that are currently marked highest priority, and name a couple.",
+        "There are 11 issues with the highest priority, including the epic ATC-3 ('Let shoppers "
+        "complete checkout'), the bug ATC-43 ('Checkout can create two orders from a double click'), "
+        "and the bug ATC-68 ('Tracking link opens a different beta order').",
+    ),
+    RagasCase(
+        # Ground truth here comes ONLY from ATC-46's attached PDF (inventory-correction-requirement.pdf,
+        # parsed via Docling into chunk_type=attachment) — the SKU value never appears in the issue's
+        # own title/description or in any comment. Added after finding attachment content was fully
+        # implemented and indexed but had zero eval coverage proving it's actually reachable end-to-end
+        # (see docs/RAG_ACCURACY_CASE_STUDIES.md).
+        "ATC-46 attachment worked example: what SKU and order reference does it use, and what "
+        "quantity is restored?",
+        "The worked example uses SKU A-104, order reference BETA-1043, and a restored quantity of 1.",
+    ),
+    RagasCase(
+        # CSV attachment (docling plain-text/table parse, no OCR involved) — ground truth exists only
+        # in the reproduction table, not the issue's own bug report prose.
+        "ATC-20 attachment reproduction data: which SKU has a negative input price, and what row "
+        "number is it?",
+        "The SKU with a negative input price is D-402, on row 19 (input price -4.00).",
+    ),
+    RagasCase(
+        # XLSX attachment (docling table-structure parse) — a second file-type/content-shape besides
+        # the PDF (ATC-46) and CSV (ATC-20) cases above, closing the "only tested one format" gap.
+        "ATC-27 attachment concurrency results: what was the lock-release time in ms for run 4, and "
+        "what happened in that run?",
+        "Run 4 released its lock after 138 ms. The first request hit a client timeout; the second "
+        "request succeeded, creating order BETA-1064.",
+    ),
+    RagasCase(
+        # Markdown attachment (plain-text parse) — a fourth file type/content shape.
+        "ATC-13 attached API contract: what stock value is returned for the active SKU example, and "
+        "what error code is returned for an unknown SKU?",
+        "The active SKU example returns a stock value of 4. An unknown SKU returns the error code "
+        "PRODUCT_NOT_FOUND.",
+    ),
+    RagasCase(
+        # Plain-text .log attachment (direct UTF-8 decode) — a fifth file type.
+        "ATC-59 attached diagnostic log: what is the guest_token value logged?",
+        "The guest_token value logged is gt_7f2.",
+    ),
+    RagasCase(
+        # PNG screenshot, OCR'd via EasyOCR. Deliberately graded on the price (a robust OCR signal),
+        # not the garbled product-name text this fixture's OCR pass mangles (see
+        # docs/RAG_ACCURACY_CASE_STUDIES.md) — standard practice for noisy-OCR eval.
+        "ATC-15 attached screenshot (before state): what price is shown for the item?",
+        "The price shown is USD 28.00.",
+    ),
+    RagasCase(
+        # Second CSV example (ATC-73) — same file type as ATC-20's case above, different issue/fact,
+        # so a single lucky format-level fix can't explain both passing.
+        "ATC-73 attached background-import-run.csv: how many rows were rejected during the 'failed' "
+        "phase, and how many catalog rows had been written by that point?",
+        "During the 'failed' phase, 2 rows were rejected, and 0 catalog rows had been written yet "
+        "(catalog rows are only written once the run reaches the 'applied' phase).",
+    ),
+    RagasCase(
+        # Second .log example (ATC-68) — the issue body already states the BETA-1128/BETA-1123 mixup
+        # narrative, so ground truth here is deliberately the internal error CODE, which only exists
+        # in the log, not the human-readable bug report.
+        "ATC-68 attached diagnostic log: what error code is logged?",
+        "The error code logged is order_link_reference_mismatch.",
+    ),
+    RagasCase(
+        # Second PDF example (ATC-63) — a state-transition table, a different content shape from
+        # ATC-46's requirement doc.
+        "ATC-63 attached beta order state model: who is the actor for the transition from "
+        "'cancelled' to 'refund pending', and what is the customer note?",
+        "The actor is operations, and the customer note is 'refund started'.",
+    ),
+    RagasCase(
+        # Second XLSX example (ATC-56) — a test matrix, a different content shape from ATC-27's
+        # concurrency-run log table.
+        "ATC-56 attached guest-cart-merge-matrix: what is the expected result for the 'Stock limit' "
+        "test case?",
+        "The expected result for the 'Stock limit' case is 'x4 + note' — the merge caps the quantity "
+        "at the available stock (4) and includes an explanatory note for the quantity that could not "
+        "be kept.",
+    ),
 ]
 
 
@@ -122,21 +213,32 @@ def ask(base_url: str, space_ids: List[int], question: str, timeout: float = 400
 
 
 def collect_samples(base_url: str, space_ids: List[int]) -> tuple[List[dict], List[str]]:
-    """Returns (ragas_samples, structured_only_questions).
+    """Returns (ragas_samples, excluded_questions).
 
     RAGAS's faithfulness/context_precision/context_recall are all defined as "is the answer
-    supported by this retrieved TEXT" — a vanilla chunk-based-RAG assumption. This system is hybrid:
-    count/list/relationship questions are answered by a structured, deterministic tool call
-    (query_issues/query_sprints) that is self-grounding by design (`_ground_answer` explicitly does
-    not require a citation for it — see crag_loop.py) and never populates `citations` at all. Handing
-    RAGAS a placeholder "no context" string for those would score a CORRECT, tool-grounded answer as
-    unfaithful for a reason that has nothing to do with the answer's actual correctness (found live on
-    the first real run: exactly this happened for every structured-only question). Those are split out
-    here and reported separately rather than silently averaged into the RAGAS numbers — an honest
-    scope boundary, not a workaround to inflate the score.
+    supported by this retrieved context" — originally read narrowly here as "retrieved TEXT" only
+    (`citations`, from search_knowledge_base/get_issue_comments/get_issue_details), a vanilla
+    chunk-based-RAG assumption this system's hybrid tool surface doesn't fully share: count/list/
+    relationship questions are answered by a structured, deterministic tool call (query_issues/
+    query_sprints/get_issue_history) that is self-grounding by design (`_ground_answer` explicitly
+    does not require a citation for it — see crag_loop.py) and never populated `citations`. An earlier
+    version of this function excluded every such question from RAGAS's scope entirely — correct in
+    spirit (don't score a claim against context that can't support it), but wider than it needed to
+    be: those structured tool calls' own result text was always available on `AgentAnswer`, it just
+    wasn't being surfaced through the API or fed to RAGAS. Fixed live after finding it caused a false
+    "unfaithful" score on a genuinely correct, tool-grounded answer ("is there a blocked issue" —
+    the "blocked" status came from query_issues, not from the one retrieved text chunk RAGAS could
+    see) — see docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 23.
+
+    `AskResponse.structured_evidence` now carries exactly that text, so it's included in
+    `retrieved_contexts` alongside `citations` here. The exclusion path below should now rarely
+    trigger — only for a genuine non-abstaining answer with neither citations nor any structured
+    tool call behind it at all (in practice: hasn't happened once since this fix; kept as a safety
+    net, not removed, since "score a claim against literally no context" would be worse than
+    excluding it).
     """
     samples = []
-    structured_only = []
+    excluded = []
     for i, case in enumerate(CASES, 1):
         t0 = time.time()
         try:
@@ -145,20 +247,23 @@ def collect_samples(base_url: str, space_ids: List[int]) -> tuple[List[dict], Li
             print(f"[{i}/{len(CASES)}] ERROR {case.question!r}: HTTP {e.code}", file=sys.stderr)
             continue
         citations = body.get("citations", [])
+        structured_evidence = body.get("structuredEvidence", [])
         abstained = bool(body.get("abstained"))
         print(
             f"[{i}/{len(CASES)}] {round(time.time() - t0, 1)}s "
-            f"abstained={abstained} citations={len(citations)} — {case.question}"
+            f"abstained={abstained} citations={len(citations)} structured_evidence={len(structured_evidence)} "
+            f"— {case.question}"
         )
-        if not citations and not abstained:
-            # Structured-tool-answered, self-grounding by design — out of RAGAS's scope, not a gap.
-            structured_only.append(case.question)
-            continue
-        contexts = [c.get("content", "") for c in citations] or [
-            # Only reached for a genuine abstention (abstained=True, no citations) — an accurate
-            # "no context" context, unlike the structured-only case excluded above.
-            "No relevant information was found in the knowledge base for this query."
-        ]
+        contexts = [c.get("content", "") for c in citations] + list(structured_evidence)
+        if not contexts:
+            if abstained:
+                # An accurate "no context" context — genuinely nothing was retrieved or queried.
+                contexts = ["No relevant information was found in the knowledge base for this query."]
+            else:
+                # Safety net for a case that (as of this fix) shouldn't occur in practice: a
+                # non-abstaining answer with no text citations AND no structured tool call behind it.
+                excluded.append(case.question)
+                continue
         samples.append(
             {
                 "user_input": case.question,
@@ -167,7 +272,7 @@ def collect_samples(base_url: str, space_ids: List[int]) -> tuple[List[dict], Li
                 "reference": case.reference,
             }
         )
-    return samples, structured_only
+    return samples, excluded
 
 
 def main() -> None:
@@ -186,16 +291,16 @@ def main() -> None:
     args = parser.parse_args()
 
     print(f"Collecting {len(CASES)} live /ask samples from {args.url} ...")
-    samples, structured_only = collect_samples(args.url, args.space_ids)
-    if structured_only:
+    samples, excluded = collect_samples(args.url, args.space_ids)
+    if excluded:
         print(
-            f"\n{len(structured_only)} question(s) excluded from RAGAS scope (structured-tool-"
-            f"answered, self-grounding, no retrieved text chunk to score against):"
+            f"\n{len(excluded)} question(s) excluded from RAGAS scope (no citations AND no "
+            f"structured tool evidence at all — see collect_samples' docstring; should be rare):"
         )
-        for q in structured_only:
+        for q in excluded:
             print(f"  - {q}")
     if not samples:
-        print("No chunk-grounded samples collected — aborting.", file=sys.stderr)
+        print("No groundable samples collected — aborting.", file=sys.stderr)
         sys.exit(1)
 
     # Imported lazily: these pull in langchain/ragas, which real Ask-AI request-serving code never
@@ -261,7 +366,7 @@ def main() -> None:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(
-        {"means": means, "structured_only_excluded": structured_only,
+        {"means": means, "excluded_no_context": excluded,
          "per_sample": df.to_dict(orient="records")},
         indent=2,
     ))

@@ -1,0 +1,258 @@
+{
+  "means": {
+    "faithfulness": 0.819,
+    "answer_relevancy": 0.773,
+    "context_precision": 0.818,
+    "context_recall": 0.855
+  },
+  "excluded_no_context": [],
+  "per_sample": [
+    {
+      "user_input": "How many bugs are there in total, and how many are still open?",
+      "retrieved_contexts": [
+        "Structured issue query (filters={'issue_keys': [], 'issue_types': ['bug'], 'statuses': [], 'priorities': [], 'sprint_ids': [], 'sprint_names': [], 'created_after': '', 'created_before': '', 'updated_after': '', 'updated_before': '', 'order_by': 'updated_at', 'order': 'desc', 'limit': 20}):\ntotal_count = 11 (exact; this is the number to report for 'how many')\nby type: bug=11\nby status: done=11\nmatching issues:\n  [ATC-76] type=bug status=done sprint=AtlasCart Sprint 6 parent_key=ATC-51 updated=2026-07-08T17:58:00Z \u2014 Edited product remains stale in search\n  [ATC-68] type=bug status=done sprint=AtlasCart Sprint 6 parent_key=ATC-50 updated=2026-07-03T21:58:00Z \u2014 Tracking link opens a different beta order\n  [ATC-59] type=bug status=done sprint=AtlasCart Sprint 4 parent_key=ATC-49 updated=2026-06-10T18:58:00Z \u2014 Cart merge doubles a matching SKU\n  [ATC-43] type=bug status=done sprint=AtlasCart Sprint 3 parent_key=ATC-4 updated=2026-06-01T23:00:00Z \u2014 Checkout can create two orders from a double click\n  [ATC-46] type=bug status=done sprint=AtlasCart Sprint 3 parent_key=ATC-4 updated=2026-05-29T20:00:00Z \u2014 Restore stock after a duplicate beta order\n  [ATC-39] type=bug status=done sprint=AtlasCart Sprint 3 parent_key=ATC-6 updated=2026-05-28T21:00:00Z \u2014 Cart controls overlap on a narrow screen\n  [ATC-37] type=bug status=done sprint=AtlasCart Sprint 3 parent_key=ATC-6 updated=2026-05-27T22:00:00Z \u2014 Polish the empty cart on narrow screens\n  [ATC-48] type=bug status=done sprint=(backlog) parent_key=ATC-3 updated=2026-05-15T18:15:00Z \u2014 Checkout accepts more items than current stock\n  [ATC-21] type=bug status=done sprint=AtlasCart Sprint 1 parent_key=ATC-1 updated=2026-04-30T18:50:00Z \u2014 Missing image returns a raw browser error\n  [ATC-20] type=bug status=done sprint=AtlasCart Sprint 1 parent_key=ATC-2 updated=2026-04-29T21:35:00Z \u2014 Reject catalog rows without a valid price\n  [ATC-19] type=bug status=done sprint=AtlasCart Sprint 1 parent_key=ATC-6 updated=2026-04-28T19:10:00Z \u2014 Price wraps under the image on small screens"
+      ],
+      "response": "There are **11 bugs in total**. **0 are still open**\u2014all 11 are marked **done**.",
+      "reference": "There are 11 bugs in total, and 0 are still open \u2014 all 11 currently have status done.",
+      "faithfulness": NaN,
+      "answer_relevancy": 0.8610751944220946,
+      "context_precision": 0.9999999999,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "What was the root cause of the checkout double-order bug, ATC-43?",
+      "retrieved_contexts": [
+        "ATC-43 Subtask of ATC-4 (Give operations a usable order view). Checkout can create two orders from a double click Context During the private beta, a slow checkout allowed two Place order clicks. Two order records were created and stock was reduced twice. Only one sandbox payment succeeded. We need a safe mitigation and follow-up fixes. Bug report When / environment: Private-beta build beta-1.0.0 in Chrome with Slow 3G and one Desk Lamp in the cart. Steps to reproduce: Use the accepted sandbox card and click Place order twice before the pending state appears. Expected behavior: One checkout attempt returns one order, captures one sandbox payment, and reduces stock once. Actual behavior: Orders BETA-1042 and BETA-1043 are inserted and stock falls by two, although only one payment is captured. Subtasks ATC-44 \u2014 Reject repeated checkout requests The permanent fix is an API idempotency check before order insert. Tracking it separately lets backend deploy the technical fix without mixing it into incident coordination. ATC-45 \u2014 Disable Place order while checkout is pending Browser repeat-click mitigation reduces customer exposure before the API fix lands. Frontend can ship the disabled Place order state while the incident remains open. ATC-47 \u2014 Cover slow checkout in regression tests The slow double-click reproduction needs a repeatable browser regression, not a one-off manual retest. The subtask owns automated exit criteria tied to the checkout test plan. Acceptance criteria AC1 \u2014 The report records one intended checkout, the two resulting orders, the stock impact, and the payment outcome. AC2 \u2014 Frontend mitigation and API idempotency stop a repeat action from creating another order. AC3 \u2014 The incident remains open until stock recovery and slow-browser regression work are complete. Estimate reasoning 5 \u2014 Investigation crosses browser behavior, gateway logs, order inserts, payment outcome, and stock impact. Mitigation and permanent fixes are split into subtasks, but coordination, customer communication, and exit verification remain on the incident.",
+        "ATC-43 Subtask of ATC-4 (Give operations a usable order view). Checkout can create two orders from a double click Context During the private beta, a slow checkout allowed two Place order clicks. Two order records were created and stock was reduced twice. Only one sandbox payment succeeded. We need a safe mitigation and follow-up fixes. Bug report When / environment: Private-beta build beta-1.0.0 in Chrome with Slow 3G and one Desk Lamp in the cart. Steps to reproduce: Use the accepted sandbox card and click Place order twice before the pending state appears. Expected behavior: One checkout attempt returns one order, captures one sandbox payment, and reduces stock once. Actual behavior: Orders BETA-1042 and BETA-1043 are inserted and stock falls by two, although only one payment is captured. Subtasks ATC-44 \u2014 Reject repeated checkout requests The permanent fix is an API idempotency check before order insert. Tracking it separately lets backend deploy the technical fix without mixing it into incident coordination. ATC-45 \u2014 Disable Place order while checkout is pending Browser repeat-click mitigation reduces customer exposure before the API fix lands. Frontend can ship the disabled Place order state while the incident remains open. ATC-47 \u2014 Cover slow checkout in regression tests The slow double-click reproduction needs a repeatable browser regression, not a one-off manual retest. The subtask owns automated exit criteria tied to the checkout test plan. Acceptance criteria AC1 \u2014 The report records one intended checkout, the two resulting orders, the stock impact, and the payment outcome. AC2 \u2014 Frontend mitigation and API idempotency stop a repeat action from creating another order. AC3 \u2014 The incident remains open until stock recovery and slow-browser regression work are complete. Estimate reasoning 5 \u2014 Investigation crosses browser behavior, gateway logs, order inserts, payment outcome, and stock impact. Mitigation and permanent fixes are split into subtasks, but coordination, customer communication, and exit verification remain on the incident.",
+        "ATC-44 now returns the first order result for a repeated key. The attached duplicate-checkout-requests.log is the redacted gateway/API evidence that ruled out a proxy retry: two request IDs reached the API with retry_count=0. I am keeping the incident open until Daniel finishes ATC-47.",
+        "Both requests reached the API and returned 201. There is no proxy retry in the request logs.",
+        "I found the second insert. We create the order before checking whether this checkout request was already handled.",
+        "ATC-4 Give operations a usable order view Context Create orders from checkout and give customer operations enough information to understand and correct beta problems without editing the database. Acceptance criteria AC1 \u2014 Every accepted checkout creates a readable order with item-price snapshots and one stock change. AC2 \u2014 Customer operations can find the order reference, status, total, and time without seeing a full address in the list. Estimate reasoning Not estimated \u2014 this epic is the operations and order-management outcome. Order creation, recent-order view, incident recovery, and stock correction are sized separately and roll up here."
+      ],
+      "response": "The root cause was that a slow checkout allowed the customer to click **Place order** twice before the pending state appeared. Both requests reached the API and returned `201`; the API inserted the order **before checking whether the checkout request had already been handled**, so it created two orders and reduced stock twice. It was not caused by a proxy retry. (ATC-43)\n\nOnly one sandbox payment was captured, but orders **BETA-1042** and **BETA-1043** were created. (ATC-43)",
+      "reference": "The root cause was that the API created the order before checking whether the checkout request had already been handled, so a double-click on Place order (with no idempotency protection) created two separate order records instead of one.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.7298715194144793,
+      "context_precision": 0.8666666666377778,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "Which issues are the real subtasks of ATC-43?",
+      "retrieved_contexts": [
+        "Structured issue query (filters={'issue_keys': [], 'issue_types': ['subtask'], 'statuses': [], 'priorities': [], 'sprint_ids': [], 'sprint_names': [], 'created_after': '', 'created_before': '', 'updated_after': '', 'updated_before': '', 'order_by': 'updated_at', 'order': 'desc', 'limit': 20}):\ntotal_count = 9 (exact; this is the number to report for 'how many')\nby type: subtask=9\nby status: done=6, in_progress=2, planned=1\nmatching issues:\n  [ATC-81] type=subtask status=in_progress sprint=AtlasCart Sprint 7 parent_key=ATC-77 updated=2026-07-27T00:28:33.561929Z \u2014 Exercise catalog cache invalidation during import\n  [ATC-83] type=subtask status=planned sprint=AtlasCart Sprint 7 parent_key=ATC-80 updated=2026-07-27T00:28:33.561915Z \u2014 Add a cold shipping-quote load scenario\n  [ATC-82] type=subtask status=in_progress sprint=AtlasCart Sprint 7 parent_key=ATC-78 updated=2026-07-16T19:00:00Z \u2014 Fix checkout focus after validation errors\n  [ATC-47] type=subtask status=done sprint=AtlasCart Sprint 3 parent_key=ATC-43 updated=2026-05-29T21:30:00Z \u2014 Cover slow checkout in regression tests\n  [ATC-44] type=subtask status=done sprint=AtlasCart Sprint 2 parent_key=ATC-43 updated=2026-05-15T20:10:00Z \u2014 Reject repeated checkout requests\n  [ATC-45] type=subtask status=done sprint=AtlasCart Sprint 2 parent_key=ATC-43 updated=2026-05-14T23:20:00Z \u2014 Disable Place order while checkout is pending\n  [ATC-41] type=subtask status=done sprint=AtlasCart Sprint 2 parent_key=ATC-29 updated=2026-05-11T21:20:00Z \u2014 Add a payment adapter contract test\n  [ATC-40] type=subtask status=done sprint=AtlasCart Sprint 2 parent_key=ATC-24 updated=2026-05-08T19:20:00Z \u2014 Show the cart count in the header\n  [ATC-22] type=subtask status=done sprint=AtlasCart Sprint 2 parent_key=ATC-10 updated=2026-05-04T18:20:00Z \u2014 Define how duplicate supplier SKUs are handled"
+      ],
+      "response": "The real subtasks of **ATC-43** are:\n\n- **ATC-47** \u2014 Cover slow checkout in regression tests \u2014 **Done**\n- **ATC-44** \u2014 Reject repeated checkout requests \u2014 **Done**\n- **ATC-45** \u2014 Disable Place order while checkout is pending \u2014 **Done**",
+      "reference": "The real subtasks of ATC-43 are ATC-44 (the API idempotency fix), ATC-45 (disabling Place order while checkout is pending), and ATC-47 (regression tests). ATC-46 is a separate, related bug under the same parent epic (ATC-4), not a subtask of ATC-43.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.9453922053369651,
+      "context_precision": 0.9999999999,
+      "context_recall": 0.5
+    },
+    {
+      "user_input": "Why was ATC-30 reopened?",
+      "retrieved_contexts": [
+        "Reopening this because the beta incident shows that one browser action can submit twice. The story is not complete until the API handles a repeated request safely.",
+        "Verification result PASS \u2014 a normal request and five repeated requests produce one order, one item snapshot set, and one stock reduction. Acceptance criteria checked AC1 \u2014 PASS An accepted checkout creates one order with item-price snapshots, shipping details, payment reference, and readable order number. AC2 \u2014 PASS The stock check, stock reduction, order insert, and idempotency record succeed or roll back together. AC3 \u2014 PASS Five submissions with the same checkout key return the first order and reduce stock once. Close decision every acceptance criterion above passed; any separate follow-up remains on its linked issue.",
+        "The order endpoint now uses the checkout idempotency key before insert. The focused API test passes; the slow-browser regression remains under ATC-47.",
+        "One normal checkout creates one order and reduces stock once. Marking the planned happy path verified.",
+        "Order creation and item snapshots are in staging. This reviewed diagram records where the checkout key must be checked relative to payment, order insert, and stock change: Attached evidence",
+        "Issue change history (filters={'issue_keys': ['ATC-30'], 'fields': ['status'], 'event_types': ['field_change'], 'since': '', 'until': '', 'reopened_only': True, 'limit': 20}):\ntotal_count = 1 (exact)\n  [ATC-30] 2026-05-14T17:20:00Z Noah Kim changed status: done -> in_progress"
+      ],
+      "response": "ATC-30 was reopened because a beta incident showed that one browser action could submit checkout twice. The issue needed additional work to make the API safely handle repeated requests. (ATC-30)",
+      "reference": "ATC-30 was reopened by Noah Kim on 2026-05-14 after a beta incident showed that one browser action could submit twice; it was not considered complete until the API could safely handle a repeated request.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.9999999999999997,
+      "context_precision": 0.9999999999,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "Why was ATC-68 reopened?",
+      "retrieved_contexts": [
+        "Issue change history (filters={'issue_keys': ['ATC-68'], 'fields': ['status'], 'event_types': ['field_change'], 'since': '1970-01-01T00:00:00Z', 'until': '2026-08-04T00:05:00Z', 'reopened_only': True, 'limit': 20}):\ntotal_count = 1 (exact)\n  [ATC-68] 2026-07-02T16:00:00Z Daniel Park changed status: done -> in_progress \u2014 Daniel reopened the issue after the resent-email check failed"
+      ],
+      "response": "ATC-68 was reopened on July 2, 2026, when Daniel Park moved it from **done** to **in progress** after the resent-email check failed. Its current status is **done**. (ATC-68)",
+      "reference": "ATC-68 was reopened by Daniel Park on 2026-07-02 after the resent-email check failed.",
+      "faithfulness": 0.75,
+      "answer_relevancy": 0.6832590152995004,
+      "context_precision": 0.9999999999,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "Which epic does ATC-43 belong to?",
+      "retrieved_contexts": [
+        "Structured issue query (filters={'issue_keys': ['ATC-43'], 'issue_types': [], 'statuses': [], 'priorities': [], 'sprint_ids': [], 'sprint_names': [], 'created_after': '', 'created_before': '', 'updated_after': '', 'updated_before': '', 'order_by': 'updated_at', 'order': 'desc', 'limit': 20}):\ntotal_count = 1 (exact; this is the number to report for 'how many')\nby type: bug=1\nby status: done=1\nmatching issues:\n  [ATC-43] type=bug status=done sprint=AtlasCart Sprint 3 parent_key=ATC-4 updated=2026-06-01T23:00:00Z \u2014 Checkout can create two orders from a double click"
+      ],
+      "response": "ATC-43 belongs to the **ATC-4** epic.",
+      "reference": "ATC-43 belongs to the epic ATC-4.",
+      "faithfulness": 0.0,
+      "answer_relevancy": 0.9999999999999997,
+      "context_precision": 0.0,
+      "context_recall": 0.0
+    },
+    {
+      "user_input": "Which epic does ATC-59 belong to?",
+      "retrieved_contexts": [
+        "Structured issue query (filters={'issue_keys': ['ATC-59'], 'issue_types': [], 'statuses': [], 'priorities': [], 'sprint_ids': [], 'sprint_names': [], 'created_after': '', 'created_before': '', 'updated_after': '', 'updated_before': '', 'order_by': 'updated_at', 'order': 'desc', 'limit': 20}):\ntotal_count = 1 (exact; this is the number to report for 'how many')\nby type: bug=1\nby status: done=1\nmatching issues:\n  [ATC-59] type=bug status=done sprint=AtlasCart Sprint 4 parent_key=ATC-49 updated=2026-06-10T18:58:00Z \u2014 Cart merge doubles a matching SKU"
+      ],
+      "response": "ATC-59 belongs to epic **ATC-49**.",
+      "reference": "ATC-59 belongs to the epic ATC-49.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.9999999999999996,
+      "context_precision": 0.9999999999,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "What is ATC-59 about?",
+      "retrieved_contexts": [
+        "ATC-59 Subtask of ATC-49 (Give returning shoppers a secure account). Cart merge doubles a matching SKU Context A shopper with two mugs in an account cart and one in a guest cart sees six after sign-in because the merge callback runs twice. Bug report When / environment: Private beta, Chrome 127, account cart quantity 2 and guest cart quantity 1 for SKU F-612. Steps to reproduce: Add one mug as a guest, sign into an account that already has two, then refresh the callback route. Expected behavior: The merged cart contains three mugs once. Actual behavior: The first callback shows three and the retry doubles the account quantity to six. Acceptance criteria AC1 \u2014 The example carts merge to quantity three, not six, when stock is available. Estimate reasoning 3 \u2014 The faulty calculation is straightforward, but the fix must preserve idempotency under callback retry and verify multiple overlap patterns. No schema migration is required. Attached reference: Issue-opening diagnostic for ATC-59, preserving the observed error plus explicit expected and actual output so engineering can reproduce the bug without guessing. [file] cart-merge-doubles-a-matching-sku-diagnostic.log"
+      ],
+      "response": "ATC-59 is about a cart-merge bug for returning shoppers. When a shopper signs in, the merge callback can run twice and double the account quantity for matching SKUs\u2014for example, merging two account mugs with one guest mug results in six instead of three. The fix must make the merge idempotent under callback retries and handle multiple overlapping-SKU patterns without a schema migration. (ATC-59)",
+      "reference": "ATC-59 is a bug where merging a guest cart into an account cart during sign-in doubles a matching SKU's quantity, because the merge callback runs twice instead of once.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.8245205405508987,
+      "context_precision": 0.9999999999,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "Is there any blocked issue in the workspace, and what is it about?",
+      "retrieved_contexts": [
+        "ATC-77 Subtask of ATC-52 (Prepare AtlasCart for a larger public beta). Cache the public product catalog safely Context Reduce repeated catalog reads for the public beta without serving inactive products or hiding a seller update for too long. Acceptance criteria AC1 \u2014 Repeated public catalog requests meet the cache-hit latency target under the agreed load. Estimate reasoning 5 \u2014 This combines cache keys, invalidation, fallback, load tests, and observability. Personalized catalog responses and multi-region cache replication are excluded.",
+        "Work update Read-through caching is working for list and detail routes; the team is still testing invalidation during a large import. What is included 5 \u2014 This combines cache keys, invalidation, fallback, load tests, and observability. Personalized catalog responses and multi-region cache replication are excluded.",
+        "Structured issue query (filters={'issue_keys': [], 'issue_types': [], 'statuses': ['blocked'], 'priorities': [], 'sprint_ids': [], 'sprint_names': [], 'created_after': '', 'created_before': '', 'updated_after': '', 'updated_before': '', 'order_by': 'updated_at', 'order': 'desc', 'limit': 50}):\ntotal_count = 1 (exact; this is the number to report for 'how many')\nby type: story=1\nby status: blocked=1\nmatching issues:\n  [ATC-77] type=story status=blocked sprint=AtlasCart Sprint 7 parent_key=ATC-52 updated=2026-07-25T08:30:22.636678Z \u2014 Cache the public product catalog safely"
+      ],
+      "response": "Yes. There is **1 blocked issue**:\n\n- **ATC-77 \u2014 \u201cCache the public product catalog safely.\u201d** It is a subtask of **ATC-52**, focused on reducing repeated catalog reads for the public beta while ensuring inactive products aren\u2019t served and seller updates aren\u2019t hidden too long. Its scope includes cache keys, invalidation, fallback behavior, load tests, and observability; personalized responses and multi-region replication are excluded. (ATC-77)",
+      "reference": "Yes \u2014 ATC-77 ('Cache the public product catalog safely') is the only blocked issue. It is about caching the public product catalog, not related to checkout or payments.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.8140114571150239,
+      "context_precision": 0.8333333332916666,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "How many issues are in the currently active sprint?",
+      "retrieved_contexts": [
+        "Structured sprint query (filters={'statuses': ['active'], 'order_by': 'start_date', 'order': 'desc', 'limit': 20}):\ntotal_count = 1 (exact; this is the number to report for 'how many')\nby status: active=1\nmatching sprints:\n  [5000074] AtlasCart Sprint 7 status=active dates=2026-07-13..2026-07-24 points=None/None (final) or /None (committed) \u2014 goal: Prove the storefront is accessible, observable, and ready for a larger public beta.",
+        "Structured issue query (filters={'issue_keys': [], 'issue_types': [], 'statuses': [], 'priorities': [], 'sprint_ids': [5000074], 'sprint_names': [], 'created_after': '', 'created_before': '', 'updated_after': '', 'updated_before': '', 'order_by': 'updated_at', 'order': 'desc', 'limit': 20}):\ntotal_count = 8 (exact; this is the number to report for 'how many')\nby type: story=2, subtask=3, task=3\nby status: blocked=1, done=1, in_progress=5, planned=1\nmatching issues:\n  [ATC-79] type=task status=in_progress sprint=AtlasCart Sprint 7 parent_key=ATC-52 updated=2026-07-27T00:28:33.575422Z \u2014 Run the public-beta release readiness review\n  [ATC-78] type=task status=in_progress sprint=AtlasCart Sprint 7 parent_key=ATC-52 updated=2026-07-27T00:28:33.562253Z \u2014 Complete the public-beta accessibility pass\n  [ATC-80] type=task status=in_progress sprint=AtlasCart Sprint 7 parent_key=ATC-52 updated=2026-07-27T00:28:33.561953Z \u2014 Load-test catalog through checkout\n  [ATC-81] type=subtask status=in_progress sprint=AtlasCart Sprint 7 parent_key=ATC-77 updated=2026-07-27T00:28:33.561929Z \u2014 Exercise catalog cache invalidation during import\n  [ATC-83] type=subtask status=planned sprint=AtlasCart Sprint 7 parent_key=ATC-80 updated=2026-07-27T00:28:33.561915Z \u2014 Add a cold shipping-quote load scenario\n  [ATC-77] type=story status=blocked sprint=AtlasCart Sprint 7 parent_key=ATC-52 updated=2026-07-25T08:30:22.636678Z \u2014 Cache the public product catalog safely\n  [ATC-82] type=subtask status=in_progress sprint=AtlasCart Sprint 7 parent_key=ATC-78 updated=2026-07-16T19:00:00Z \u2014 Fix checkout focus after validation errors\n  [ATC-72] type=story status=done sprint=AtlasCart Sprint 7 parent_key=ATC-51 updated=2026-07-15T21:58:00Z \u2014 Index products for catalog search"
+      ],
+      "response": "There are **8 issues** in the currently active sprint, **AtlasCart Sprint 7**.",
+      "reference": "There are 8 issues in the currently active sprint, AtlasCart Sprint 7.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.740056097177542,
+      "context_precision": 0.49999999995,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "How many sprints are there in total, and how many of them are completed?",
+      "retrieved_contexts": [
+        "Structured sprint query (filters={'statuses': [], 'order_by': 'start_date', 'order': 'asc', 'limit': 1}):\ntotal_count = 7 (exact; this is the number to report for 'how many')\nby status: active=1, completed=6\nmatching sprints (showing first 1 of 7):\n  [5000068] AtlasCart Sprint 1 status=completed dates=2026-04-20..2026-05-01 points=42/50 (final) or /42 (committed) \u2014 goal: Load a small seller catalog and let a shopper browse product details in staging.",
+        "Structured sprint query (filters={'statuses': ['completed'], 'order_by': 'start_date', 'order': 'asc', 'limit': 1}):\ntotal_count = 6 (exact; this is the number to report for 'how many')\nby status: completed=6\nmatching sprints (showing first 1 of 6):\n  [5000068] AtlasCart Sprint 1 status=completed dates=2026-04-20..2026-05-01 points=42/50 (final) or /42 (committed) \u2014 goal: Load a small seller catalog and let a shopper browse product details in staging."
+      ],
+      "response": "There are **7 sprints in total**, of which **6 are completed**.",
+      "reference": "There are 7 sprints in total; 6 (Sprints 1-6) are completed and 1 (Sprint 7) is active.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.9571617503269562,
+      "context_precision": 0.9999999999,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "What was our AWS bill last month?",
+      "retrieved_contexts": [
+        "No relevant information was found in the knowledge base for this query."
+      ],
+      "response": "There is no information about this in the knowledge base.",
+      "reference": "There is no information about this in the knowledge base \u2014 this workspace contains no financial, cost, or AWS billing data.",
+      "faithfulness": 0.0,
+      "answer_relevancy": 0.0,
+      "context_precision": 0.9999999999,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "Count the issues that are currently marked highest priority, and name a couple.",
+      "retrieved_contexts": [
+        "Structured issue query (filters={'issue_keys': [], 'issue_types': [], 'statuses': [], 'priorities': ['highest'], 'sprint_ids': [], 'sprint_names': [], 'created_after': '', 'created_before': '', 'updated_after': '', 'updated_before': '', 'order_by': 'updated_at', 'order': 'desc', 'limit': 2}):\ntotal_count = 11 (exact; this is the number to report for 'how many')\nby type: bug=3, epic=1, story=4, subtask=2, task=1\nby status: done=11\nmatching issues (showing first 2 of 11):\n  [ATC-3] type=epic status=done sprint=(backlog) parent_key=(none) updated=2026-07-22T04:40:53.796126Z \u2014 Let shoppers complete checkout\n  [ATC-68] type=bug status=done sprint=AtlasCart Sprint 6 parent_key=ATC-50 updated=2026-07-03T21:58:00Z \u2014 Tracking link opens a different beta order"
+      ],
+      "response": "There are **11 issues** currently marked **highest priority**. A couple are:\n\n- **ATC-3** \u2014 \u201cLet shoppers complete checkout\u201d\n- **ATC-68** \u2014 \u201cTracking link opens a different beta order\u201d",
+      "reference": "There are 11 issues with the highest priority, including the epic ATC-3 ('Let shoppers complete checkout'), the bug ATC-43 ('Checkout can create two orders from a double click'), and the bug ATC-68 ('Tracking link opens a different beta order').",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.8320519732773932,
+      "context_precision": 0.9999999999,
+      "context_recall": 0.75
+    },
+    {
+      "user_input": "ATC-46 attachment worked example: what SKU and order reference does it use, and what quantity is restored?",
+      "retrieved_contexts": [
+        "[Attachment: inventory-correction-requirement.pdf \u2014 issue ATC-46]\nThis chunk contains the first three sections of an AtlasCart synthetic project record, outlining the problem statement, correction workflow, and audit behavior for the inventory correction feature while ending abruptly before the final section.\n\nATLASCART  /  SYNTHETIC PROJECT RECORD\n\n## Inventory correction requirement\n\n## SECTION 01\n\n## 1. Problem and operating context\n\n## AT A GLANCE\n\nThe duplicate checkout incident created two order records and reduced stock twice for one intended purchase.\n\nCustomer operations can identify the duplicate, but today an engineer must edit fixture stock directly.\n\nThe beta needs a narrow correction action that is safe enough to explain during support review.\n\nThis is not a general inventory-management feature and does not replace the stock transaction in checkout.\n\nPrimary actor: an authorized operations member. Reviewer: engineering or QA during the private beta.\n\nATC  /  AtlasCart synthetic project record\n\nPAGE 1 OF 4\n\n01 / 04\n\nATLASCART  /  SYNTHETIC PROJECT RECORD\n\n## Inventory correction requirement\n\n## SECTION 02\n\n## 2. Correction workflow\n\n## AT A GLANCE\n\nOperations opens the affected order and selects Restore stock.\n\nThe form requires the duplicate or cancelled order reference, affected SKU,\n\nquantity, and a plain-language reason.\n\nThe system shows the current stock count and the proposed count before confirmation.\n\nQuantity must be positive and cannot exceed the quantity recorded on that order line.\n\nThe action refuses an order that is not cancelled or identified as the duplicate recovery case.\n\nSubmitting the same correction twice returns the existing result and does not increment stock again.\n\nATC  /  AtlasCart synthetic project record\n\nPAGE 2 OF 4\n\n02 / 04\n\nATLASCART  /  SYNTHETIC PROJECT RECORD\n\n## Inventory correction requirement\n\n## SECTION 03\n\n## 3. Audit, access, and failure behavior\n\n## AT A GLANCE\n\nEach successful correction records order reference, SKU, old count, new count, quantity, reason, actor, and timestamp.\n\nThe audit entry never stores a shopper address, email, payment detail, or full provider payload.\n\nA failed database transaction changes neither stock nor the audit record.\n\nAn unauthorized member receives a clear forbidden response with no stock detail beyond the existing order view.\n\nConcurrent checkout and correction operations use the same stock consistency boundary.\n\nApplication logs include request ID and order reference but no customer personal data.\n\nATC  /  AtlasCart synthetic project record\n\nPAGE 3 OF 4\n\n03 / 04\n\nATLASCART  /  SYNTHETIC PROJECT RECORD\n\n## Inventory correction requirement\n\n## SECTION 04\n\n## 4. Acceptance criteria and"
+      ],
+      "response": "The worked example uses:\n\n- **SKU:** `A-104`\n- **Order reference:** `BETA-1043`\n- **Quantity restored:** `1` (ATC-46 attachment)",
+      "reference": "The worked example uses SKU A-104, order reference BETA-1043, and a restored quantity of 1.",
+      "faithfulness": 0.0,
+      "answer_relevancy": 0.5098511906451537,
+      "context_precision": 0.0,
+      "context_recall": 0.0
+    },
+    {
+      "user_input": "ATC-20 attachment reproduction data: which SKU has a negative input price, and what row number is it?",
+      "retrieved_contexts": [
+        "[Attachment: invalid-price-reproduction.csv \u2014 issue ATC-20]\ntest_case,source_row,sku,input_price,expected,actual_before_fix\nblank price,18,B-208,,reject row 18 and save nothing,imported as USD 0.00\nnegative price,19,D-402,-4.00,reject row 19 and save nothing,rejected without row number\ntext price,20,F-612,not_available,reject row 20 and save nothing,generic parse error\nvalid decimal,21,C-311,74.50,accept row at USD 74.50,accepted\nzero price,22,G-701,0.00,accept row at USD 0.00,accepted"
+      ],
+      "response": "The SKU is **D-402**, and it appears on **row 19**. (ATC-20)",
+      "reference": "The SKU with a negative input price is D-402, on row 19 (input price -4.00).",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.6104881998300025,
+      "context_precision": 0.9999999999,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "ATC-27 attachment concurrency results: what was the lock-release time in ms for run 4, and what happened in that run?",
+      "retrieved_contexts": [
+        "[Attachment: stock-concurrency-results.xlsx \u2014 issue ATC-27]\n|   Run | Build      | Database    |   Starting stock |   Cart A quantity |   Cart B quantity | First result     | Second result   |   Orders created |   Ending stock |   Lock released (ms) | Result   |\n|-------|------------|-------------|------------------|-------------------|-------------------|------------------|-----------------|------------------|----------------|----------------------|----------|\n|     1 | beta-1.0.2 | postgres-15 |                1 |                 1 |                 1 | 201 BETA-1061    | 409 SKU_CHANGED |                1 |              0 |                   42 | pass     |\n|     2 | beta-1.0.2 | postgres-15 |                2 |                 2 |                 1 | 201 BETA-1062    | 409 SKU_CHANGED |                1 |              0 |                   47 | pass     |\n|     3 | beta-1.0.2 | postgres-15 |                3 |                 2 |                 2 | 201 BETA-1063    | 409 SKU_CHANGED |                1 |              1 |                   44 | pass     |\n|     4 | beta-1.0.2 | postgres-15 |                1 |                 1 |                 1 | client timeout   | 201 BETA-1064   |                1 |              0 |                  138 | pass     |\n|     5 | beta-1.0.2 | postgres-15 |                1 |                 1 |                 1 | payment rejected | 201 BETA-1065   |                1 |              0 |                   51 | pass     |",
+        "Sprint 3 completion Final timeout and lock-release checks passed. The stock transaction releases cleanly after a simulated payment timeout, so all ATC-27 acceptance criteria are now complete."
+      ],
+      "response": "Run 4 released the lock after **138 ms**. Cart A timed out, then Cart B succeeded with **201 BETA-1064**; **1 order** was created and ending stock was **0**. The run **passed**. (ATC-27)",
+      "reference": "Run 4 released its lock after 138 ms. The first request hit a client timeout; the second request succeeded, creating order BETA-1064.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.7456686742414793,
+      "context_precision": 0.9999999999,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "ATC-13 attached API contract: what stock value is returned for the active SKU example, and what error code is returned for an unknown SKU?",
+      "retrieved_contexts": [
+        "[Attachment: product-detail-api-contract.md \u2014 issue ATC-13]\n# Product detail endpoint verification\n\n## Why this evidence exists\n\nATC-13 is a backend endpoint task. The useful proof is the HTTP contract used by the web client, not a browser screenshot. All values below are synthetic.\n\n## Active SKU\n\n```\nGET /api/products/C-311\n200 OK\nContent-Type: application/json\n\n{\"sku\":\"C-311\",\"name\":\"Adjustable Bamboo Monitor Stand\",\"price\":74.50,\"currency\":\"USD\",\"stock\":4,\"active\":true}\n```\n\nThe response contains the description, current price, stock, and image reference needed by ATC-14.\n\n## Unknown SKU\n\n```\nGET /api/products/NO-SUCH-SKU\n404 Not Found\n\n{\"code\":\"PRODUCT_NOT_FOUND\",\"message\":\"Product not found\"}\n```\n\n## Inactive SKU\n\n```\nGET /api/products/OLD-901\n404 Not Found\n\n{\"code\":\"PRODUCT_NOT_FOUND\",\"message\":\"Product not found\"}\n```\n\nThe unknown and inactive cases intentionally return the same safe shape.\n\n## Acceptance result\n\n- AC1: PASS \u2014 the active product returns all agreed fields.\n- AC2: PASS \u2014 unknown and inactive SKUs use the same 404 response.\n- AC3: PASS \u2014 the response does not reveal whether a seller removed the product.\n\n## Reproduction\n\n```\nbuild=atlascart-api:catalog-s1-27\nenvironment=staging\nfixture=synthetic-catalog-v3\n```",
+        "Verification result PASS \u2014 active SKUs return details and both unknown and inactive SKUs return the same safe 404 response. Acceptance criteria checked AC1 \u2014 PASS An active SKU returns its description, price, stock, and image reference, while unknown or inactive SKUs return the same safe not-found response. Close decision every acceptance criterion above passed; any separate follow-up remains on its linked issue. Visual evidence [file] product-detail-api-contract.md",
+        "ATC-13 Subtask of ATC-2 (Create a reliable product catalog). Add the product detail endpoint Context Return one active product by SKU with its description, price, stock, and image reference. Missing and inactive products should return a clear not-found response. Acceptance criteria AC1 \u2014 An active SKU returns its description, price, stock, and image reference, while unknown or inactive SKUs return the same safe not-found response. Estimate reasoning 3 \u2014 The endpoint is limited to one SKU lookup, response mapping, and a shared safe 404 for unknown or inactive products. The schema already exists and no authorization or caching design is part of this task."
+      ],
+      "response": "- **Active SKU `C-311`:** `stock: 4` in the `200 OK` response. (ATC-13)\n- **Unknown SKU:** HTTP **404 Not Found** with error code **`PRODUCT_NOT_FOUND`**. (ATC-13)",
+      "reference": "The active SKU example returns a stock value of 4. An unknown SKU returns the error code PRODUCT_NOT_FOUND.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.7897969767715969,
+      "context_precision": 0.8333333332916666,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "ATC-59 attached diagnostic log: what is the guest_token value logged?",
+      "retrieved_contexts": [
+        "Work update The callback now stores and returns the first merge result before clearing the guest token; repeated callbacks no longer recalculate quantities. What is included 3 \u2014 The faulty calculation is straightforward, but the fix must preserve idempotency under callback retry and verify multiple overlap patterns. No schema migration is required.",
+        "[Attachment: cart-merge-doubles-a-matching-sku-diagnostic.log \u2014 issue ATC-59]\n2026-06-08T09:12:00-07:00 level=ERROR service=cart-api issue=ATC-59 request_id=req_synthetic_59\nWHEN: Private beta, Chrome 127, account cart quantity 2 and guest cart quantity 1 for SKU F-612.\nSTEPS: Add one mug as a guest, sign into an account that already has two, then refresh the callback route.\nEXPECTED: The merged cart contains three mugs once.\nACTUAL: The first callback shows three and the retry doubles the account quantity to six.\nERROR: merge_callback_replayed guest_token=gt_7f2 prior_result=missing quantity_applied_twice=true\nDATA_SAFETY: synthetic fixture values only; no customer data or credential is present."
+      ],
+      "response": "The logged `guest_token` value is `gt_7f2`. (ATC-59)",
+      "reference": "The guest_token value logged is gt_7f2.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.8073615927564983,
+      "context_precision": 0.49999999995,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "ATC-15 attached screenshot (before state): what price is shown for the item?",
+      "retrieved_contexts": [
+        "[Attachment: atlascart-m1-atc-15-missing-image-ac1-before.png \u2014 issue ATC-15]\nCHROME SLON 36 SKU B-208 QAK TRAY USD 28.00 IN STOCK BROKEN ICON FLASHES BEFORE PLACEHOLDER",
+        "[Attachment: atlascart-m1-atc-15-missing-image-ac1-after.png \u2014 issue ATC-15]\nCHROME SLON 36 AFTER FIX QAK TRAY USD 28.00 IMAGE IN STOCK PLACEHOLDER SHONN DIRECTLY BROKEN ICON FLASH"
+      ],
+      "response": "The item is shown at **USD 28.00**. (ATC-15 attachment)",
+      "reference": "The price shown is USD 28.00.",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.8312984242602767,
+      "context_precision": 0.99999999995,
+      "context_recall": 1.0
+    }
+  ]
+}
