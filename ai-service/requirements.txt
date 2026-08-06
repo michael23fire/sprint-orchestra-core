@@ -9,10 +9,39 @@ anthropic==0.42.0
 httpx==0.27.2
 tenacity==9.0.0
 
+# --- Sprint recovery: event-driven re-evaluation (app/sprint_recovery/kafka_trigger.py) ---
+# A second, independent consumer group on the SAME topic vectorization-service already consumes
+# (jira.content.ingestion) — Kafka consumer groups are isolated from each other, so this doesn't
+# compete with or duplicate that service's own ingestion consumption. Same aiokafka version already
+# proven against this project's Kafka setup.
+aiokafka==0.12.0
+
 # --- AI-assisted task creation (app/drafting/) ---
 instructor==1.15.4
 openai==2.48.0
 Jinja2==3.1.6
+
+# --- Multi-agent epic planning (app/planning/graph.py), off by default behind
+# AI_EPIC_PLANNING_MULTIAGENT_ENABLED. Orchestration only — the nodes still call the same `instructor`
+# client above, so no second LLM abstraction is introduced.
+#
+# Pinned to 0.4.x deliberately, not latest: langgraph >=1.0 requires langchain-core >=1.0, which is
+# mutually exclusive with the ragas 0.2.15 + langchain 0.3.x eval stack below (verified by actually
+# installing it — pip resolved langchain-core to 1.5.3 and broke all three langchain packages). 0.4.10
+# resolves cleanly against the pinned langchain-core 0.3.79 (`pip check` clean, both stacks import).
+langgraph==0.4.10
+
+# --- Epic rollout: durable, human-approved commit-to-Jira workflow (app/planning/rollout_graph.py) ---
+# Real Postgres-backed checkpointing (AsyncPostgresSaver), not InMemorySaver — a pending approval must
+# survive a process restart. langgraph-checkpoint-postgres's *latest* release (3.x) pulls
+# langgraph-checkpoint>=4.1.0, which breaks langgraph-prebuilt 1.0.1's own `<4.0.0` pin (verified by
+# actually installing latest and hitting that exact pip conflict) — same class of transitive-pin
+# collision as the langgraph/ragas one above. 2.0.25 (langgraph-prebuilt's last 2.x-compatible line)
+# resolves cleanly (`pip check` clean) alongside everything else in this file.
+langgraph-checkpoint-postgres==2.0.25
+# [binary] bundles libpq instead of requiring it on the host — this project targets a laptop dev
+# environment with no assumed system Postgres client library installed.
+psycopg[binary]==3.3.4
 
 # --- Phoenix tracing (app/tracing.py) + prompt versioning (scripts/push_prompt_to_phoenix.py),
 # optional: AI_PHOENIX_ENABLED=true ---

@@ -1,0 +1,1657 @@
+{
+  "generator_model": "gpt-5.6-luna",
+  "judge_model": "qwen2.5-72b-instruct",
+  "verdict": "DECISION RULE => default the flag to FALSE.\nEstimator node => CUT (no lift in estimate_reasonableness).",
+  "rows": [
+    {
+      "case": "trivial-one-liner",
+      "challenge": "Over-decomposition: a reviewer should NOT invent five issues for a one-line change. Tests that the critic doesn't manufacture coverage gaps to look useful.",
+      "single": {
+        "issue_count": 3,
+        "llm_calls": 1,
+        "revision_rounds": 0,
+        "latency_seconds": 5.84,
+        "degraded": false,
+        "error": null,
+        "epic_title": "Enforce Strict SameSite Session Cookies",
+        "issues": [
+          {
+            "temp_id": "1",
+            "title": "Identify all session-cookie issuance paths",
+            "description": "Inspect backend configuration and code to locate every path that creates or updates the session cookie, including environment-specific or fallback configurations. Record the relevant names and configuration points so the attribute is changed consistently.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "security"
+            ],
+            "estimate_story_points": 2,
+            "estimate_rationale": "The work is limited to repository and configuration inspection, with uncertainty mainly around multiple issuance paths.",
+            "depends_on": []
+          },
+          {
+            "temp_id": "2",
+            "title": "Set session cookies to SameSite Strict",
+            "description": "Change the session cookie configuration at every identified issuance point from `SameSite=Lax` to `SameSite=Strict`. Preserve the existing cookie name, Secure, HttpOnly, expiration, and domain/path settings unless required by the implementation.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "security"
+            ],
+            "estimate_story_points": 2,
+            "estimate_rationale": "The code change is small, but consistency across all cookie configuration paths must be maintained.",
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "3",
+            "title": "Verify Strict SameSite session behavior",
+            "description": "Add or update automated tests and targeted verification to assert that session cookies include `SameSite=Strict` and that same-site login, authentication, and session renewal flows remain functional. Include coverage for each supported configuration or issuance path.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "security"
+            ],
+            "estimate_story_points": 3,
+            "estimate_rationale": "Testing spans cookie-header assertions and regression checks for existing authenticated flows.",
+            "depends_on": [
+              "2"
+            ]
+          }
+        ],
+        "judgment": {
+          "completeness_reasoning": "/5 The plan includes all necessary steps to achieve the goal of changing the SameSite attribute from Lax to Strict. It identifies the required tasks (locating paths, making changes, and verifying behavior) which cover the scope of the proposal without unnecessary padding.",
+          "completeness": 4,
+          "non_redundancy_reasoning": "/5 The plan does not include redundant tasks or overly detailed steps that could be considered padding. Each task is focused and relevant to the goal, maintaining a concise approach to the implementation.",
+          "non_redundancy": 5,
+          "dependency_correctness_reasoning": "/5 The dependencies between tasks are logically sound. Task 2 depends on Task 1 because the paths must be identified before changes can be made. Task 3 depends on Task 2 as verification is necessary after making the configuration changes.",
+          "dependency_correctness": 5,
+          "estimate_reasonableness_reasoning": "/5 The estimates for each task are reasonable and proportional to the work described. Identifying all session-cookie issuance paths (2 pts) and setting the cookies to SameSite Strict (2 pts) are appropriately sized, reflecting similar levels of effort. Verifying the changes (3 pts) is slightly larger due to the complexity of ensuring all configurations remain functional.",
+          "estimate_reasonableness": 4
+        }
+      },
+      "multiagent": {
+        "issue_count": 1,
+        "llm_calls": 2,
+        "revision_rounds": 0,
+        "latency_seconds": 5.0,
+        "degraded": false,
+        "error": null,
+        "epic_title": "Harden Session Cookie Cross-Site Protection",
+        "issues": [
+          {
+            "temp_id": "1",
+            "title": "Set session cookies to SameSite Strict",
+            "description": "Change the session cookie configuration from SameSite=Lax to SameSite=Strict. Add or update automated tests to verify the emitted cookie attribute and confirm existing same-site session behavior remains intact.",
+            "issue_type": "task",
+            "labels": [
+              "security"
+            ],
+            "estimate_story_points": 1,
+            "estimate_rationale": "The change is limited to cookie configuration and focused regression coverage.",
+            "depends_on": []
+          }
+        ],
+        "judgment": {
+          "completeness_reasoning": "\u2014 Score: 4\nReason: The plan covers all key aspects of the proposal, including changing the cookie setting, verifying the change, and ensuring no disruption to current functionality.",
+          "completeness": 4,
+          "non_redundancy_reasoning": "\u2014 Score: 5\nReason: The plan does not contain any redundant or unnecessary tasks. It focuses on the core requirement without adding extraneous work.",
+          "non_redundancy": 5,
+          "dependency_correctness_reasoning": "\u2014 Score: 5\nReason: The single task is appropriately scoped and does not introduce dependencies that are not justified by the proposal.",
+          "dependency_correctness": 5,
+          "estimate_reasonableness_reasoning": "\u2014 Score: 4\nReason: The estimate for the task seems reasonable given the nature of the work, which involves configuration changes and testing. However, a slight increase in points might be warranted to account for potential unforeseen issues during implementation.",
+          "estimate_reasonableness": 4
+        }
+      }
+    },
+    {
+      "case": "large-multi-subsystem",
+      "challenge": "Under-coverage: a single pass tends to drop the least-salient requirements (backfill, dead-lettering, admin dashboard) when the proposal names many.",
+      "single": {
+        "issue_count": 9,
+        "llm_calls": 1,
+        "revision_rounds": 0,
+        "latency_seconds": 11.87,
+        "degraded": false,
+        "error": null,
+        "epic_title": "Unify Notification Delivery and Preferences",
+        "issues": [
+          {
+            "temp_id": "1",
+            "title": "Build the unified notification service foundation",
+            "description": "Create the common notification model, service API, provider abstraction, and persistence needed to accept notification requests across all channels. Establish correlation identifiers and a consistent lifecycle for queued, processing, delivered, and failed notifications.",
+            "issue_type": "task",
+            "labels": [
+              "backend"
+            ],
+            "estimate_story_points": 8,
+            "estimate_rationale": "This establishes the core service contract, persistence model, and integration boundary used by every delivery channel.",
+            "depends_on": []
+          },
+          {
+            "temp_id": "2",
+            "title": "Add email notification delivery",
+            "description": "Implement email delivery through the unified service, including provider integration, message formatting, provider response capture, and delivery-state updates. Preserve the existing email use cases while routing them through the new service interface.",
+            "issue_type": "story",
+            "labels": [
+              "backend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "The work includes one provider integration and mapping provider responses into the shared delivery lifecycle.",
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "3",
+            "title": "Add SMS notification delivery",
+            "description": "Implement SMS delivery through the unified service, including provider integration, message formatting, provider response capture, and delivery-state updates. Ensure phone-number validation and channel-specific provider errors are represented consistently.",
+            "issue_type": "story",
+            "labels": [
+              "backend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "The scope is a single channel integration with validation and provider-specific error handling.",
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "4",
+            "title": "Add in-app notification delivery",
+            "description": "Implement in-app notification creation and retrieval through the unified service, including persistence, unread/read state, and delivery-state updates. Provide the existing application surfaces with the data needed to display notifications to users.",
+            "issue_type": "story",
+            "labels": [
+              "backend",
+              "frontend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "This requires both shared-service integration and user-facing in-app notification state and retrieval behavior.",
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "5",
+            "title": "Centralize notification preferences and quiet hours",
+            "description": "Create the canonical per-user preference model and APIs for channel, notification-type, and quiet-hour settings. Apply these settings before delivery so suppressed notifications are recorded with an explicit reason and can be handled consistently across all channels.",
+            "issue_type": "story",
+            "labels": [
+              "backend",
+              "frontend"
+            ],
+            "estimate_story_points": 8,
+            "estimate_rationale": "The work spans preference data modeling, user-facing settings behavior, quiet-hour evaluation, and integration with delivery decisions.",
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "6",
+            "title": "Add delivery retries and dead-letter handling",
+            "description": "Implement retry policies for transient failures, including backoff and attempt limits, and route exhausted notifications to a durable dead-letter mechanism. Record failure reasons and operational metadata so failed notifications can be investigated or replayed safely.",
+            "issue_type": "task",
+            "labels": [
+              "backend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "The main complexity is reliable asynchronous processing, failure classification, and durable operational state.",
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "7",
+            "title": "Expose notification status in the admin dashboard",
+            "description": "Add admin dashboard views and filters for notification status, channel, recipient, timestamps, retry attempts, and failure reasons. Use the unified service\u2019s delivery records to support investigation without requiring access to individual provider systems.",
+            "issue_type": "story",
+            "labels": [
+              "frontend",
+              "backend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "This requires a status query surface plus dashboard UI, filtering, and failure-detail presentation.",
+            "depends_on": [
+              "1",
+              "6"
+            ]
+          },
+          {
+            "temp_id": "8",
+            "title": "Backfill preferences from legacy tables",
+            "description": "Map and migrate notification preferences from the three existing tables into the canonical preference model. Make the backfill idempotent, produce reconciliation metrics, and define handling for conflicting or incomplete legacy records.",
+            "issue_type": "task",
+            "labels": [
+              "backend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "The migration requires field mapping, conflict rules, repeatable execution, and validation across three legacy sources.",
+            "depends_on": [
+              "5"
+            ]
+          },
+          {
+            "temp_id": "9",
+            "title": "Cut over notification producers to the unified service",
+            "description": "Update existing notification producers to use the unified service, run validation and parity checks against legacy behavior, and disable the old notification paths after successful rollout. Include rollout safeguards and monitoring so traffic can be reverted if delivery regressions occur.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "infra"
+            ],
+            "estimate_story_points": 8,
+            "estimate_rationale": "The cutover spans multiple existing producers, production rollout coordination, parity validation, and legacy-system retirement.",
+            "depends_on": [
+              "2",
+              "3",
+              "4",
+              "5",
+              "6",
+              "8"
+            ]
+          }
+        ],
+        "judgment": {
+          "completeness_reasoning": "/5 - The plan covers all aspects of the proposal, including the creation of a unified service, implementation of email, SMS, and in-app notifications, centralization of preferences, retry mechanisms, admin dashboard integration, and backfill of legacy data. No key components are missing.",
+          "completeness": 5,
+          "non_redundancy_reasoning": "/5 - Each task and story is distinct and serves a specific purpose without unnecessary overlap or redundancy. The plan efficiently addresses each requirement with minimal repetition.",
+          "non_redundancy": 5,
+          "dependency_correctness_reasoning": "/4 - Dependencies are logical and necessary for the flow of tasks, ensuring that foundational components (e.g., notification service foundation) are completed before building upon them (e.g., email delivery). However, task [6] might not strictly need to depend on all previous tasks, as retry and dead-letter handling could be developed in parallel with other features.",
+          "dependency_correctness": 4,
+          "estimate_reasonableness_reasoning": "/5 - The estimates appear proportionate to the work described. For instance, building the foundation is given a higher estimate (8 pts) due to its complexity and foundational nature, while specific delivery mechanisms (email, SMS, in-app) are given moderate estimates (5 pts each). The backfill task is appropriately estimated considering the potential for data conflicts and incomplete records.",
+          "estimate_reasonableness": 5
+        }
+      },
+      "multiagent": {
+        "issue_count": 9,
+        "llm_calls": 4,
+        "revision_rounds": 1,
+        "latency_seconds": 31.12,
+        "degraded": false,
+        "error": null,
+        "epic_title": "Unify Notification Delivery and Preferences",
+        "issues": [
+          {
+            "temp_id": "1",
+            "title": "Define the unified notification contract and preference model",
+            "description": "Specify the shared notification payload, channel types, delivery states, user preference schema, quiet-hour rules, and persistence model. Include compatibility requirements for data from the three legacy preference tables so downstream implementation and migration use one canonical representation.",
+            "issue_type": "task",
+            "labels": [],
+            "estimate_story_points": 3,
+            "estimate_rationale": null,
+            "depends_on": []
+          },
+          {
+            "temp_id": "2",
+            "title": "Implement the unified notification orchestration service",
+            "description": "Build the service API and persistence layer that accepts notification requests, resolves recipients and eligible channels, records delivery state, and dispatches work to channel providers. Ensure the service can support existing producers during the eventual cutover.",
+            "issue_type": "task",
+            "labels": [],
+            "estimate_story_points": 8,
+            "estimate_rationale": null,
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "3",
+            "title": "Add email and SMS delivery adapters",
+            "description": "Implement email and SMS channel adapters for the unified service, including provider requests, provider response mapping, and delivery-state updates. Use the shared notification contract so both channels participate in the same preference and reliability flow.",
+            "issue_type": "story",
+            "labels": [],
+            "estimate_story_points": 5,
+            "estimate_rationale": null,
+            "depends_on": [
+              "2"
+            ]
+          },
+          {
+            "temp_id": "4",
+            "title": "Add in-app notification delivery",
+            "description": "Implement the in-app channel on the unified service, including persistence and retrieval of notifications for users through the existing application experience or notification API. Record creation, read, and delivery-related state consistently with the other channels.",
+            "issue_type": "story",
+            "labels": [],
+            "estimate_story_points": 5,
+            "estimate_rationale": null,
+            "depends_on": [
+              "2"
+            ]
+          },
+          {
+            "temp_id": "5",
+            "title": "Add preference and quiet-hour enforcement",
+            "description": "Expose the canonical per-user notification preferences and quiet-hour settings and enforce them before channel dispatch. Define behavior for timezone handling, disabled channels, and notifications that are suppressed or deferred during quiet hours.",
+            "issue_type": "story",
+            "labels": [],
+            "estimate_story_points": 5,
+            "estimate_rationale": null,
+            "depends_on": [
+              "1",
+              "2"
+            ]
+          },
+          {
+            "temp_id": "6",
+            "title": "Add delivery retries and dead-letter handling",
+            "description": "Implement retry policies for transient channel failures, including bounded attempts and backoff, and move permanently failed notifications to a durable dead-letter store. Record attempt counts, failure reasons, and terminal status for operational review and potential replay.",
+            "issue_type": "task",
+            "labels": [],
+            "estimate_story_points": 5,
+            "estimate_rationale": null,
+            "depends_on": [
+              "2",
+              "3",
+              "4"
+            ]
+          },
+          {
+            "temp_id": "7",
+            "title": "Expose delivery status in the admin dashboard",
+            "description": "Add admin dashboard views or API-backed components showing notification status, channel, attempts, failures, and dead-letter state. Support enough filtering or lookup to investigate an individual user notification and aggregate delivery problems.",
+            "issue_type": "story",
+            "labels": [],
+            "estimate_story_points": 5,
+            "estimate_rationale": null,
+            "depends_on": [
+              "6"
+            ]
+          },
+          {
+            "temp_id": "8",
+            "title": "Backfill preferences from the legacy tables",
+            "description": "Build and run an idempotent migration that reads preferences from all three existing tables, resolves conflicts according to documented precedence rules, and writes the canonical preference records. Produce validation counts and exception reporting so missing or ambiguous records can be reviewed before cutover.",
+            "issue_type": "task",
+            "labels": [],
+            "estimate_story_points": 5,
+            "estimate_rationale": null,
+            "depends_on": [
+              "1",
+              "2"
+            ]
+          },
+          {
+            "temp_id": "9",
+            "title": "Cut over producers and retire the legacy notification paths",
+            "description": "Update existing notification producers to call the unified service, execute the rollout with monitoring and rollback safeguards, and disable the home-grown notification implementations after traffic is confirmed on the new service. Document the final ownership, operational procedures, and removal of obsolete configuration.",
+            "issue_type": "task",
+            "labels": [],
+            "estimate_story_points": 5,
+            "estimate_rationale": null,
+            "depends_on": [
+              "3",
+              "4",
+              "5",
+              "6",
+              "8"
+            ]
+          }
+        ],
+        "judgment": {
+          "completeness_reasoning": "'4', because the plan covers all aspects mentioned in the proposal including preference centralization, delivery channels, retry mechanisms, quiet hours, admin visibility, and data migration.",
+          "completeness": 4,
+          "non_redundancy_reasoning": "'5', as there is no redundancy; each task or story addresses a distinct component of the system without overlap.",
+          "non_redundancy": 5,
+          "dependency_correctness_reasoning": "'4', dependencies are logically set up to ensure that foundational components (like the notification contract and service API) are completed before building on them, though some could be parallelized if team size permits (e.g., email and SMS adapters).",
+          "dependency_correctness": 4,
+          "estimate_reasonableness_reasoning": "'3', the estimates seem reasonable for the tasks described; however, more complex tasks like implementing the service API and delivery adapters might benefit from a higher point value to account for unforeseen complexities or integration challenges.",
+          "estimate_reasonableness": 3
+        }
+      }
+    },
+    {
+      "case": "vague-ambiguous",
+      "challenge": "A proposal with no concrete requirements \u2014 tests whether the critic flags genuine gaps or just pads the plan with generic tasks.",
+      "single": {
+        "issue_count": 4,
+        "llm_calls": 1,
+        "revision_rounds": 0,
+        "latency_seconds": 6.99,
+        "degraded": false,
+        "error": null,
+        "epic_title": "Improve Reporting Performance and Usability",
+        "issues": [
+          {
+            "temp_id": "1",
+            "title": "Investigate reporting performance bottlenecks",
+            "description": "Profile the reporting section across representative reports and workflows to identify the main causes of slow loading or interaction. Document the baseline metrics, bottlenecks, and recommended remediation plan so implementation can target the highest-impact areas.",
+            "issue_type": "task",
+            "labels": [
+              "performance"
+            ],
+            "estimate_story_points": 3,
+            "estimate_rationale": "The scope depends on the number of report types, data volumes, and profiling depth required to isolate bottlenecks.",
+            "depends_on": []
+          },
+          {
+            "temp_id": "2",
+            "title": "Improve reporting load and interaction performance",
+            "description": "Address the highest-impact performance issues identified in the reporting investigation, such as inefficient data retrieval, rendering, or unnecessary client-side work. Verify that commonly used reports load and respond faster than the documented baseline.",
+            "issue_type": "story",
+            "labels": [
+              "performance"
+            ],
+            "estimate_story_points": null,
+            "estimate_rationale": null,
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "3",
+            "title": "Streamline common reporting workflows",
+            "description": "Review the reporting interface and simplify navigation, filtering, report selection, and other high-frequency tasks based on customer friction points. Implement clearer flows and controls so users can find and configure reports with fewer confusing or unnecessary steps.",
+            "issue_type": "story",
+            "labels": [
+              "frontend"
+            ],
+            "estimate_story_points": null,
+            "estimate_rationale": null,
+            "depends_on": []
+          },
+          {
+            "temp_id": "4",
+            "title": "Validate reporting improvements",
+            "description": "Run performance checks and usability validation against representative reporting scenarios after the changes are implemented. Capture remaining issues, confirm improvements against the baseline, and document any follow-up work needed.",
+            "issue_type": "task",
+            "labels": [
+              "performance"
+            ],
+            "estimate_story_points": 3,
+            "estimate_rationale": "Validation spans both measurable performance comparisons and usability checks across representative reporting workflows.",
+            "depends_on": [
+              "2",
+              "3"
+            ]
+          }
+        ],
+        "judgment": {
+          "completeness_reasoning": "/5 (The plan covers all key aspects of the proposal: identifying bottlenecks, improving performance, streamlining workflows, and validating results. It also provides a clear structure for the work.)",
+          "completeness": 5,
+          "non_redundancy_reasoning": "/5 (Each issue in the plan is distinct and necessary, with no overlap or padding. The tasks are focused and directly address different aspects of the proposal.)",
+          "non_redundancy": 5,
+          "dependency_correctness_reasoning": "/5 (The dependencies between tasks are logical and appropriate. Task [2] depends on the results from [1], and task [4] logically follows after both performance improvements and workflow changes are implemented.)",
+          "dependency_correctness": 5,
+          "estimate_reasonableness_reasoning": "/3 (While the unestimated points for tasks [2] and [3] do not penalize the plan, they also do not provide a clear sense of scope or effort required. Task [1] and [4] are reasonably estimated at 3 points each, which seems proportionate to the work described.)",
+          "estimate_reasonableness": 3
+        }
+      },
+      "multiagent": {
+        "issue_count": 4,
+        "llm_calls": 2,
+        "revision_rounds": 0,
+        "latency_seconds": 11.55,
+        "degraded": false,
+        "error": null,
+        "epic_title": "Make Reporting Faster and Easier to Use",
+        "issues": [
+          {
+            "temp_id": "1",
+            "title": "Investigate reporting performance and usability issues",
+            "description": "Analyze customer complaints, support data, usage flows, and performance traces to identify the highest-impact problems in the reporting section. Document baseline timings, problematic workflows, and prioritized recommendations to guide implementation.",
+            "issue_type": "task",
+            "labels": [
+              "performance",
+              "frontend"
+            ],
+            "estimate_story_points": 3,
+            "estimate_rationale": "Requires consolidating feedback with performance profiling and workflow analysis across the existing reporting experience.",
+            "depends_on": []
+          },
+          {
+            "temp_id": "2",
+            "title": "Improve report loading and interaction speed",
+            "description": "Optimize the reporting experience so reports open, render, and respond to common interactions more quickly. Address the highest-impact bottlenecks identified during investigation and verify the results against the established baseline.",
+            "issue_type": "story",
+            "labels": [
+              "performance",
+              "frontend"
+            ],
+            "estimate_story_points": null,
+            "estimate_rationale": null,
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "3",
+            "title": "Simplify common reporting workflows",
+            "description": "Streamline the primary reporting tasks, such as finding reports, selecting filters, configuring views, and reviewing results. Remove unnecessary steps and clarify controls based on the prioritized usability findings.",
+            "issue_type": "story",
+            "labels": [
+              "frontend"
+            ],
+            "estimate_story_points": null,
+            "estimate_rationale": null,
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "4",
+            "title": "Measure reporting improvements and collect customer feedback",
+            "description": "Add or refine analytics and feedback mechanisms needed to evaluate reporting performance, workflow completion, and customer satisfaction after the changes. Use the results to confirm whether the epic goals were met and identify remaining high-impact issues.",
+            "issue_type": "task",
+            "labels": [
+              "performance"
+            ],
+            "estimate_story_points": 2,
+            "estimate_rationale": "Covers instrumentation, validation reporting, and a focused feedback loop across the updated reporting workflows.",
+            "depends_on": [
+              "2",
+              "3"
+            ]
+          }
+        ],
+        "judgment": {
+          "completeness_reasoning": "",
+          "completeness": 4,
+          "non_redundancy_reasoning": "The plan covers all necessary aspects of the proposal without unnecessary repetition or padding.",
+          "non_redundancy": 5,
+          "dependency_correctness_reasoning": "Dependencies are logically set, ensuring that foundational tasks (investigation) precede more specific improvements and measurements.",
+          "dependency_correctness": 5,
+          "estimate_reasonableness_reasoning": "The estimated points for the tasks seem proportionate to the scope of work described. The unestimated stories are legitimate given the need to first identify high-impact areas in the initial investigation.",
+          "estimate_reasonableness": 4
+        }
+      }
+    },
+    {
+      "case": "near-duplicate-asks",
+      "challenge": "Redundancy: the first two sentences describe the same work in different words. A good plan merges them; a single pass often emits two near-identical issues.",
+      "single": {
+        "issue_count": 5,
+        "llm_calls": 1,
+        "revision_rounds": 0,
+        "latency_seconds": 13.14,
+        "degraded": false,
+        "error": null,
+        "epic_title": "Protect Public API Capacity with Client Limits and Quotas",
+        "issues": [
+          {
+            "temp_id": "1",
+            "title": "Define public API traffic-control policies",
+            "description": "Specify the rate-limit algorithms, endpoint throttling rules, per-API-key monthly quota semantics, reset timing, response codes, headers, and behavior for requests without a recognized API key. Produce an implementation-ready policy that can be applied consistently across public endpoints.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "security"
+            ],
+            "estimate_story_points": 3,
+            "estimate_rationale": "The work is primarily policy definition but requires agreement on several interacting enforcement and client-facing behaviors.",
+            "depends_on": []
+          },
+          {
+            "temp_id": "2",
+            "title": "Add client request rate limiting",
+            "description": "Implement shared rate limiting for public API clients using the approved policy, with configurable limits and a consistent 429 response when a client exceeds its allowance. Include standard limit and retry information in responses and ensure the limiter works correctly across multiple API instances.",
+            "issue_type": "story",
+            "labels": [
+              "backend",
+              "performance",
+              "security"
+            ],
+            "estimate_story_points": 8,
+            "estimate_rationale": "The implementation requires distributed state, middleware integration, configuration, and reliable behavior across horizontally scaled API instances.",
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "3",
+            "title": "Throttle high-impact public endpoints",
+            "description": "Apply endpoint-specific throttling to public endpoints whose traffic can consume disproportionate resources, such as expensive or high-contention operations. Throttling must isolate noisy integrations from other clients and produce predictable responses or delays without blocking unrelated endpoint traffic.",
+            "issue_type": "story",
+            "labels": [
+              "backend",
+              "performance"
+            ],
+            "estimate_story_points": 8,
+            "estimate_rationale": "Endpoint classification, resource isolation, and integration with existing request handling make this broader than a single generic middleware change.",
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "4",
+            "title": "Enforce monthly API-key request quotas",
+            "description": "Track requests by API key, enforce each key\u2019s configured monthly quota, and automatically reset usage at the defined monthly boundary. Return a distinct quota-exhausted response with remaining quota and reset information, while preventing race conditions that could allow significant overuse.",
+            "issue_type": "story",
+            "labels": [
+              "backend",
+              "security"
+            ],
+            "estimate_story_points": 8,
+            "estimate_rationale": "Accurate distributed usage accounting, reset handling, concurrency control, and client-visible quota state are required.",
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "5",
+            "title": "Add traffic-control monitoring and API documentation",
+            "description": "Add metrics and dashboards or alerts for rate-limit rejections, endpoint throttling, quota exhaustion, and unusual concentration by API key. Document all controls, response headers, status codes, configuration expectations, and recommended client retry behavior for public API consumers.",
+            "issue_type": "story",
+            "labels": [
+              "docs",
+              "backend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "This combines observable operational signals with externally visible documentation that must accurately describe all enforcement paths.",
+            "depends_on": [
+              "2",
+              "3",
+              "4"
+            ]
+          }
+        ],
+        "judgment": {
+          "completeness_reasoning": "The plan covers all the aspects mentioned in the proposal: rate limiting, throttling, quotas, and documentation. It also includes monitoring which adds a valuable operational aspect.",
+          "completeness": 5,
+          "non_redundancy_reasoning": "Each task is distinct and necessary, with clear dependencies that logically flow from one to the next without unnecessary overlap or padding.",
+          "non_redundancy": 5,
+          "dependency_correctness_reasoning": "The dependencies are well-defined, ensuring a logical sequence of implementation. For example, defining policies (task 1) is a prerequisite for all subsequent tasks.",
+          "dependency_correctness": 5,
+          "estimate_reasonableness_reasoning": "The estimates seem proportionate to the work described. The larger point values are assigned to more complex tasks such as implementing rate limiting and throttling, while less complex tasks like documentation (task 5) have a lower point value.",
+          "estimate_reasonableness": 4
+        }
+      },
+      "multiagent": {
+        "issue_count": 6,
+        "llm_calls": 2,
+        "revision_rounds": 0,
+        "latency_seconds": 15.4,
+        "degraded": false,
+        "error": null,
+        "epic_title": "Protect Public API Capacity with Fair Usage Controls",
+        "issues": [
+          {
+            "temp_id": "1",
+            "title": "Define public API usage policies",
+            "description": "Document the public endpoints in scope, client identity rules, default rate limits, throttling behavior, per-key monthly quotas, reset timing, and expected error or response headers. Produce configuration requirements that implementation issues can use without making policy decisions during development.",
+            "issue_type": "task",
+            "labels": [
+              "docs"
+            ],
+            "estimate_story_points": 3,
+            "estimate_rationale": "The main effort is aligning endpoint scope, client identity, limits, and reset semantics across stakeholders.",
+            "depends_on": []
+          },
+          {
+            "temp_id": "2",
+            "title": "Build shared client usage enforcement primitives",
+            "description": "Implement the shared mechanisms for identifying clients by API key, maintaining atomic request counters, applying configurable policies, and returning enforcement decisions. The primitives must support distributed API instances and avoid allowing concurrent requests to bypass limits.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "performance"
+            ],
+            "estimate_story_points": 8,
+            "estimate_rationale": "Distributed counters, concurrency correctness, and integration with existing request handling create the primary technical complexity.",
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "3",
+            "title": "Enforce per-client API rate limits",
+            "description": "Apply the shared enforcement primitives to public API requests so clients exceeding their configured request rate receive a consistent rate-limit response. Include standard limit and retry metadata and ensure normal requests remain unaffected while under the limit.",
+            "issue_type": "story",
+            "labels": [
+              "backend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "This requires integrating policy-driven request rejection across public endpoints and validating client-facing response behavior.",
+            "depends_on": [
+              "2"
+            ]
+          },
+          {
+            "temp_id": "4",
+            "title": "Add fair throttling to public endpoints",
+            "description": "Add endpoint-level throttling that limits the impact of noisy integrations through configurable concurrency or traffic-shaping controls rather than relying only on rejected requests. Preserve service responsiveness for other clients and define the behavior returned when an endpoint cannot accept more work.",
+            "issue_type": "story",
+            "labels": [
+              "backend",
+              "performance"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "The work spans endpoint integration and capacity-sensitive behavior, with tuning needs depending on existing request processing patterns.",
+            "depends_on": [
+              "2"
+            ]
+          },
+          {
+            "temp_id": "5",
+            "title": "Track and enforce monthly API-key quotas",
+            "description": "Record usage per API key, enforce each key\u2019s configured monthly quota, and reset usage at the defined monthly boundary without losing isolation between keys. Expose remaining quota, reset timing, and a consistent response when a key has exhausted its allowance.",
+            "issue_type": "story",
+            "labels": [
+              "backend"
+            ],
+            "estimate_story_points": 8,
+            "estimate_rationale": "Persistent usage accounting, boundary-safe monthly resets, and quota enforcement add more state and failure-mode complexity than rolling rate limits.",
+            "depends_on": [
+              "2",
+              "1"
+            ]
+          },
+          {
+            "temp_id": "6",
+            "title": "Add usage-control monitoring and documentation",
+            "description": "Create dashboards, metrics, and alerts for rate-limit rejections, throttled requests, quota exhaustion, and enforcement-store failures. Document the limits, response metadata, reset behavior, and integration guidance for public API consumers.",
+            "issue_type": "task",
+            "labels": [
+              "docs"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "The scope includes both operational instrumentation across enforcement paths and externally usable API documentation.",
+            "depends_on": [
+              "3",
+              "4",
+              "5"
+            ]
+          }
+        ],
+        "judgment": {
+          "completeness_reasoning": "scores a 4 because it covers all aspects of the proposal with specific tasks that address rate limiting, throttling, and quotas. It also includes a task to document policies and create monitoring, which is not explicitly required but adds value.",
+          "completeness": 4,
+          "non_redundancy_reasoning": "scores a 5 because each issue has a distinct role in the overall plan with clear dependencies and no overlap that suggests redundancy.",
+          "non_redundancy": 5,
+          "dependency_correctness_reasoning": "scores a 4 because dependencies are logical (e.g., policy definition before implementation) but could be more detailed. For instance, Issue [6] depends on the enforcement of limits and quotas, which is reasonable, though it might also depend on the documentation created in Issue [1].",
+          "dependency_correctness": 4,
+          "estimate_reasonableness_reasoning": "scores a 3 because while most estimates seem proportionate to the task (e.g., 8 points for core implementation tasks), some like the definition of policies at 3 points might be under-estimated given its importance and complexity in defining clear guidelines.",
+          "estimate_reasonableness": 3
+        }
+      }
+    },
+    {
+      "case": "ordering-dependency",
+      "challenge": "Missing dependencies: recording -> API -> UI is a hard ordering, and a single pass frequently emits all three with no depends_on edges at all.",
+      "single": {
+        "issue_count": 5,
+        "llm_calls": 1,
+        "revision_rounds": 0,
+        "latency_seconds": 8.98,
+        "degraded": false,
+        "error": null,
+        "epic_title": "Deliver a customer-facing account audit log",
+        "issues": [
+          {
+            "temp_id": "1",
+            "title": "Define and persist audit events",
+            "description": "Define the audit-event schema, supported event metadata, and storage required to retain account events. Add migrations and data-access functions so events can be created and queried consistently.",
+            "issue_type": "task",
+            "labels": [
+              "backend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "Requires a new data model, persistence layer, and migration with event metadata decisions.",
+            "depends_on": []
+          },
+          {
+            "temp_id": "2",
+            "title": "Record account events",
+            "description": "Integrate audit-event creation into the account workflows that produce customer-visible events, using the shared event model and persistence layer. Ensure recording includes the account, event type, timestamp, actor or source when available, and relevant contextual details.",
+            "issue_type": "task",
+            "labels": [
+              "backend"
+            ],
+            "estimate_story_points": 8,
+            "estimate_rationale": "Scope depends on the number and variety of existing account workflows that must emit events.",
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "3",
+            "title": "Expose authorized audit events API",
+            "description": "Implement an authenticated API for retrieving an account\u2019s audit events in chronological order, with pagination and the filters needed by the audit log page. Enforce account-level authorization and return a stable response shape for event details and timestamps.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "security"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "Combines endpoint design, authorization, filtering, pagination, and integration with the event store.",
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "4",
+            "title": "Build the audit log timeline page",
+            "description": "Add a customer-facing page that displays account events as a chronological timeline, including event details, timestamps, loading and empty states, and error handling. Connect the page to the audit events API and support the agreed event filters and pagination.",
+            "issue_type": "story",
+            "labels": [
+              "frontend"
+            ],
+            "estimate_story_points": 8,
+            "estimate_rationale": "Includes a new page, timeline presentation, filter controls, API integration, and multiple data states.",
+            "depends_on": [
+              "3"
+            ]
+          },
+          {
+            "temp_id": "5",
+            "title": "Verify end-to-end audit log behavior",
+            "description": "Add coverage for event creation, API authorization and filtering, pagination, and the timeline\u2019s rendering of representative events. Exercise the complete flow from an account action through persistence and API retrieval to customer display.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "frontend",
+              "security"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "Requires coordinated integration and UI coverage across the new recording, API, and page components.",
+            "depends_on": [
+              "2",
+              "3",
+              "4"
+            ]
+          }
+        ],
+        "judgment": {
+          "completeness_reasoning": "The plan covers all key elements mentioned in the original proposal: defining and recording audit events, creating a dedicated API for retrieving these events, and building a UI that allows customers to view and filter the events. There is no unnecessary padding.",
+          "completeness": 5,
+          "non_redundancy_reasoning": "Each task or story in the plan is distinct and necessary, with clear dependencies indicating a logical progression from backend setup (persistence of audit events) through API development to front-end implementation. There are no overlapping tasks that appear redundant.",
+          "non_redundancy": 5,
+          "dependency_correctness_reasoning": "The dependencies specified in the plan make sense and follow a natural order: defining and persisting audit events (1) is required before recording them (2), which in turn must happen before exposing an API to retrieve these events (3). The UI development (4) depends on having the API ready, and end-to-end verification (5) logically follows all other tasks.",
+          "dependency_correctness": 5,
+          "estimate_reasonableness_reasoning": "The point estimates seem proportional to the work described. Defining and persisting audit events (1), recording account events (2), exposing an API (3), building the UI (4), and end-to-end verification (5) all have reasonable estimates that reflect their complexity and scope. The dependencies are also respected in terms of sequencing.",
+          "estimate_reasonableness": 4
+        }
+      },
+      "multiagent": {
+        "issue_count": 5,
+        "llm_calls": 2,
+        "revision_rounds": 0,
+        "latency_seconds": 11.23,
+        "degraded": false,
+        "error": null,
+        "epic_title": "Provide a customer-facing account audit log",
+        "issues": [
+          {
+            "temp_id": "1",
+            "title": "Define the account event model and catalog",
+            "description": "Specify the event schema, supported event types, required metadata, timestamp semantics, and retention expectations for account audit events. Document which account actions must be recorded so producers and consumers use a consistent contract.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "docs"
+            ],
+            "estimate_story_points": 3,
+            "estimate_rationale": "The work is primarily contract design and event-catalog alignment, with limited implementation.",
+            "depends_on": []
+          },
+          {
+            "temp_id": "2",
+            "title": "Record account audit events",
+            "description": "Implement durable persistence for the agreed account event model and add recording at the relevant account action points. Ensure events include the owning account, actor or system source, event type, timestamp, and useful contextual metadata without storing sensitive secrets.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "security"
+            ],
+            "estimate_story_points": 8,
+            "estimate_rationale": "The estimate is driven by integrating event capture across multiple account workflows and validating durable storage behavior.",
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "3",
+            "title": "Expose filtered account events through an API",
+            "description": "Build an authenticated, account-scoped events endpoint that supports the audit log schema, filtering by relevant event attributes and time range, and pagination. Enforce authorization so a customer cannot retrieve events from another account.",
+            "issue_type": "story",
+            "labels": [
+              "backend",
+              "security"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "The endpoint requires query design, pagination, authorization enforcement, and integration with the new event store.",
+            "depends_on": [
+              "1",
+              "2"
+            ]
+          },
+          {
+            "temp_id": "4",
+            "title": "Build the filterable audit timeline page",
+            "description": "Add a customer-facing page that loads account events from the API and renders them as a chronological timeline with clear event labels, timestamps, actors, loading states, empty states, errors, and supported filters. Match existing product navigation and accessibility conventions.",
+            "issue_type": "story",
+            "labels": [
+              "frontend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "The estimate covers a new page, timeline presentation, filter controls, API integration, and common data states.",
+            "depends_on": [
+              "3"
+            ]
+          },
+          {
+            "temp_id": "5",
+            "title": "Verify audit log access and event coverage",
+            "description": "Add automated coverage for event creation, API filtering and pagination, tenant isolation, and representative timeline rendering. Validate that the documented account actions produce the expected events and that sensitive data is excluded from responses.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "frontend",
+              "security"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "The scope spans backend authorization and event assertions plus frontend behavior, with security isolation as a key validation area.",
+            "depends_on": [
+              "2",
+              "3",
+              "4"
+            ]
+          }
+        ],
+        "judgment": {
+          "completeness_reasoning": "'4', because the plan covers all aspects of the proposal: defining events, implementing recording, creating an API, building a UI page, and verifying functionality. No significant components are missing.",
+          "completeness": 4,
+          "non_redundancy_reasoning": "'5', as there is no unnecessary repetition or padding in the plan. Each issue is distinct and necessary to achieve the goals of the epic.",
+          "non_redundancy": 5,
+          "dependency_correctness_reasoning": "'5', because the dependencies are logically correct, with each task depending on its prerequisites (e.g., defining the event model before recording events).",
+          "dependency_correctness": 5,
+          "estimate_reasonableness_reasoning": "'4', as the point estimates seem proportionate to the described work. For example, defining the event model is a smaller task compared to implementing it and building the UI, which have higher points. However, verification (5 pts) might be slightly underestimated considering its complexity.",
+          "estimate_reasonableness": 4
+        }
+      }
+    },
+    {
+      "case": "mixed-complexity",
+      "challenge": "Estimation specifically: a config flip and a verified bulk migration in one epic. This is the case that decides whether a separate estimator node earns its cost.",
+      "single": {
+        "issue_count": 4,
+        "llm_calls": 1,
+        "revision_rounds": 0,
+        "latency_seconds": 9.23,
+        "degraded": false,
+        "error": null,
+        "epic_title": "Enable New Pricing and Preserve Historical Invoice Access",
+        "issues": [
+          {
+            "temp_id": "1",
+            "title": "Enable the new pricing page for all users",
+            "description": "Flip the existing feature flag so the new pricing page is enabled for every user in the release environment. Confirm that the flag is active and that representative user flows load the new page successfully.",
+            "issue_type": "task",
+            "labels": [],
+            "estimate_story_points": 1,
+            "estimate_rationale": "The implementation is already merged and tested, so the work is limited to configuration and rollout verification.",
+            "depends_on": []
+          },
+          {
+            "temp_id": "2",
+            "title": "Configure S3 storage for historical invoice PDFs",
+            "description": "Create or configure the S3 destination, access permissions, encryption, naming conventions, and metadata needed to store historical invoice PDFs. Ensure the migration process can write objects and record source and destination identifiers for later verification.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "infra",
+              "security"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "The scope includes storage configuration, access control, encryption, and integration details for a production data migration.",
+            "depends_on": []
+          },
+          {
+            "temp_id": "3",
+            "title": "Add fallback reads for invoice PDFs",
+            "description": "Update invoice retrieval to read the PDF from S3 when available and fall back to the on-premises file server when the S3 object is missing or unavailable. Add logging and metrics that distinguish S3 reads, fallback reads, and retrieval failures during the transition.",
+            "issue_type": "task",
+            "labels": [
+              "backend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "This requires changes to retrieval behavior, failure handling, observability, and compatibility with both storage systems.",
+            "depends_on": [
+              "2"
+            ]
+          },
+          {
+            "temp_id": "4",
+            "title": "Migrate and verify all historical invoice PDFs",
+            "description": "Copy every historical invoice PDF from the on-premises file server to S3, computing and comparing checksums for each source and destination file. Produce an auditable migration report with successful files, checksum mismatches, missing files, and retry or remediation status, and do not retire the legacy source until verification is complete.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "infra"
+            ],
+            "estimate_story_points": 8,
+            "estimate_rationale": "The work involves potentially large-scale data transfer, checksum verification, retries, reporting, and coordination with the transition read path.",
+            "depends_on": [
+              "2",
+              "3"
+            ]
+          }
+        ],
+        "judgment": {
+          "completeness_reasoning": "scores a 4 because it addresses all key components of the original proposal (pricing page roll-out, S3 migration, checksum verification, fallback read path) without unnecessary padding. It could improve by specifying how to handle migration failures in more detail.",
+          "completeness": 4,
+          "non_redundancy_reasoning": "scores a 5 because there is no redundant information or tasks; each issue is distinct and necessary for the completion of the epic.",
+          "non_redundancy": 5,
+          "dependency_correctness_reasoning": "scores a 5 as the dependencies are logical and accurately reflect the sequence in which tasks must be completed (e.g., configuring S3 before migration, adding fallback reads before verifying files).",
+          "dependency_correctness": 5,
+          "estimate_reasonableness_reasoning": "scores a 4 because the estimated points seem reasonable for the scope of work described, though the highest point value (8 pts) might be slightly high considering the tasks involved in migrating and verifying files. However, given the complexity of ensuring data integrity, it is justified.",
+          "estimate_reasonableness": 4
+        }
+      },
+      "multiagent": {
+        "issue_count": 4,
+        "llm_calls": 2,
+        "revision_rounds": 0,
+        "latency_seconds": 13.13,
+        "degraded": false,
+        "error": null,
+        "epic_title": "Launch New Pricing Page and Move Invoice PDFs to S3",
+        "issues": [
+          {
+            "temp_id": "1",
+            "title": "Enable the new pricing page for all users",
+            "description": "Flip the existing pricing-page feature flag to enable the new page globally, then verify that representative user segments receive the new experience and that the flag configuration is recorded for release auditability.",
+            "issue_type": "story",
+            "labels": [
+              "frontend"
+            ],
+            "estimate_story_points": 1,
+            "estimate_rationale": "The feature is already merged and tested, so the work is limited to configuration rollout and post-change verification.",
+            "depends_on": []
+          },
+          {
+            "temp_id": "2",
+            "title": "Prepare S3 storage and invoice verification tooling",
+            "description": "Configure the S3 destination and required access controls for historical invoice PDFs, and build or configure tooling to calculate and compare checksums between source files and uploaded objects. The tooling must support inventorying files and reporting upload or verification failures for later remediation.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "infra"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "The scope includes storage configuration, permissions, file inventory, checksum handling, and failure reporting, with integration details depending on the existing invoice storage implementation.",
+            "depends_on": []
+          },
+          {
+            "temp_id": "3",
+            "title": "Add S3-first invoice reads with legacy fallback",
+            "description": "Update invoice PDF retrieval to read from S3 first and fall back to the on-premises file server when the S3 object is missing or unavailable. Preserve existing authorization and response behavior, and emit telemetry identifying fallback reads so the transition can be monitored.",
+            "issue_type": "story",
+            "labels": [
+              "backend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "This changes a user-facing retrieval path and requires coordinated S3 integration, error handling, authorization preservation, and fallback telemetry.",
+            "depends_on": [
+              "2"
+            ]
+          },
+          {
+            "temp_id": "4",
+            "title": "Migrate and verify all historical invoice PDFs",
+            "description": "Run an idempotent, resumable migration of every historical invoice PDF from the on-premises file server to S3 using the prepared tooling. Verify each object with checksums, record the migration outcome and mismatches, and remediate or clearly report any files that cannot be verified.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "infra"
+            ],
+            "estimate_story_points": 8,
+            "estimate_rationale": "The migration covers the full historical dataset and requires operational execution, resumability, checksum verification, failure handling, and completion reporting.",
+            "depends_on": [
+              "2",
+              "3"
+            ]
+          }
+        ],
+        "judgment": {
+          "completeness_reasoning": "This plan covers all aspects of the original proposal: feature flag flipping and PDF migration to S3 with verification and fallback. It is thorough in addressing each goal and provides a clear breakdown into actionable issues.",
+          "completeness": 5,
+          "non_redundancy_reasoning": "The proposed plan does not contain any redundant or superfluous information. Each issue is distinct, necessary, and directly supports the overall goals of the epic without padding.",
+          "non_redundancy": 5,
+          "dependency_correctness_reasoning": "Dependencies are clearly defined where necessary (issues [3] and [4] depend on [2]), ensuring a logical order for task execution. This prevents potential conflicts or inefficiencies in the workflow.",
+          "dependency_correctness": 5,
+          "estimate_reasonableness_reasoning": "Estimates are reasonable and proportional to the work described. The simple feature flag change is appropriately small (1 pt), while more complex tasks such as preparing S3 and migrating PDFs have higher, justified estimates (5 and 8 pts respectively).",
+          "estimate_reasonableness": 5
+        }
+      }
+    },
+    {
+      "case": "hidden-compliance-requirement",
+      "challenge": "Coverage: 'every table that holds personal data' implies discovery/audit work that a plan focused on the download button will skip entirely.",
+      "single": {
+        "issue_count": 7,
+        "llm_calls": 1,
+        "revision_rounds": 0,
+        "latency_seconds": 9.44,
+        "degraded": false,
+        "error": null,
+        "epic_title": "Enable complete personal-data exports",
+        "issues": [
+          {
+            "temp_id": "1",
+            "title": "Inventory personal-data sources",
+            "description": "Identify every database table, relationship, and file or object-storage location that contains personal data associated with an account. Document the fields and identifiers required for inclusion in the export, including any sensitive data that requires special handling.",
+            "issue_type": "task",
+            "labels": [
+              "security",
+              "docs"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "The scope depends on discovering and classifying data across the existing schema and storage integrations.",
+            "depends_on": []
+          },
+          {
+            "temp_id": "2",
+            "title": "Design the portable export format",
+            "description": "Define the archive structure, file formats, naming conventions, metadata, and serialization rules for exporting the sources identified in the inventory. Ensure the format is machine-readable and clearly maps records back to their originating data source.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "docs"
+            ],
+            "estimate_story_points": 3,
+            "estimate_rationale": "The work is bounded but requires decisions that affect every exported data source and downstream implementation.",
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "3",
+            "title": "Build complete personal-data export generation",
+            "description": "Implement a backend export workflow that gathers the account\u2019s personal data from every inventoried source and packages it into one archive using the approved portable format. Handle large datasets, partial failures, repeat requests, and cleanup of temporary export artifacts without exposing another user\u2019s data.",
+            "issue_type": "story",
+            "labels": [
+              "backend",
+              "security",
+              "performance"
+            ],
+            "estimate_story_points": 8,
+            "estimate_rationale": "This spans multiple data sources, archive creation, failure handling, and potentially resource-intensive processing.",
+            "depends_on": [
+              "1",
+              "2"
+            ]
+          },
+          {
+            "temp_id": "4",
+            "title": "Secure export access and retention",
+            "description": "Add authorization checks so users can request and download only their own exports, and define secure storage, expiration, deletion, and audit behavior for generated archives. Protect export endpoints and temporary files against unauthorized access and predictable-download attacks.",
+            "issue_type": "task",
+            "labels": [
+              "security",
+              "backend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "Security controls must cover request authorization, artifact access, retention, and auditability across the export lifecycle.",
+            "depends_on": [
+              "3"
+            ]
+          },
+          {
+            "temp_id": "5",
+            "title": "Add export controls to Account Settings",
+            "description": "Add an Account Settings experience that lets a user request an export, see whether it is processing or ready, download the resulting archive, and understand failures or expiration. Prevent duplicate accidental submissions while allowing a new request when appropriate.",
+            "issue_type": "story",
+            "labels": [
+              "frontend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "The UI requires request state management, download handling, and clear privacy-oriented user messaging.",
+            "depends_on": [
+              "3",
+              "4"
+            ]
+          },
+          {
+            "temp_id": "6",
+            "title": "Verify export completeness and isolation",
+            "description": "Create automated and integration tests that seed personal data across every inventoried source, generate an archive, and verify that all expected records are present in the documented format. Test authorization, cross-account isolation, expiration, retries, large exports, and failure cleanup.",
+            "issue_type": "task",
+            "labels": [
+              "security",
+              "backend",
+              "performance"
+            ],
+            "estimate_story_points": 8,
+            "estimate_rationale": "Coverage must span all data sources plus security, lifecycle, and scale scenarios, with ongoing protection against omissions.",
+            "depends_on": [
+              "3",
+              "4",
+              "5"
+            ]
+          },
+          {
+            "temp_id": "7",
+            "title": "Document export contents and limitations",
+            "description": "Publish internal and user-facing documentation describing what the archive contains, its format, availability period, and how users can request it. Keep the data-source inventory and export documentation maintainable as new personal-data sources are added.",
+            "issue_type": "task",
+            "labels": [
+              "docs"
+            ],
+            "estimate_story_points": 3,
+            "estimate_rationale": "Documentation is bounded but must align with the complete source inventory and the implemented archive contract.",
+            "depends_on": [
+              "2",
+              "3",
+              "5"
+            ]
+          }
+        ],
+        "judgment": {
+          "completeness_reasoning": "Broad coverage of all necessary tasks; clear dependencies ensure a logical flow from inventory to implementation to testing. Each goal is addressed with specific tasks or stories.",
+          "completeness": 5,
+          "non_redundancy_reasoning": "No redundant issues identified; each task addresses unique aspects of the project without unnecessary overlap. The plan avoids padding and focuses on essential elements.",
+          "non_redundancy": 5,
+          "dependency_correctness_reasoning": "Dependencies are logically structured, ensuring that foundational tasks (inventory, format design) precede more complex implementation and testing phases. This prevents premature work and ensures a coherent development process.",
+          "dependency_correctness": 5,
+          "estimate_reasonableness_reasoning": "Estimates appear proportional to the described work, with larger points assigned to more complex tasks like building the export generation and verifying completeness. The inventory task is appropriately sized given its critical importance as a foundation for all subsequent steps.",
+          "estimate_reasonableness": 4
+        }
+      },
+      "multiagent": {
+        "issue_count": 6,
+        "llm_calls": 2,
+        "revision_rounds": 0,
+        "latency_seconds": 20.54,
+        "degraded": false,
+        "error": null,
+        "epic_title": "Enable complete personal-data exports",
+        "issues": [
+          {
+            "temp_id": "1",
+            "title": "Inventory personal-data sources",
+            "description": "Identify every database table and related storage location that contains personal data associated with a user account, including ownership and export transformations. Produce an auditable mapping that the export implementation and future schema changes can use to verify coverage.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "security"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "The main effort is tracing personal data across schemas and related storage, with legal and privacy review unknowns.",
+            "depends_on": []
+          },
+          {
+            "temp_id": "2",
+            "title": "Build complete personal-data archive generation",
+            "description": "Implement a backend export workflow that gathers the data sources defined in the inventory, packages the results into one downloadable archive, and handles large exports without request timeouts. Include clear export status, failure handling, and a retention or expiration policy for generated archives.",
+            "issue_type": "story",
+            "labels": [
+              "backend",
+              "security"
+            ],
+            "estimate_story_points": 13,
+            "estimate_rationale": "This spans all identified data sources, archive generation, asynchronous processing, storage, expiration, and failure handling.",
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "3",
+            "title": "Secure export authorization and delivery",
+            "description": "Enforce that export requests and downloads are limited to the authenticated account owner, with appropriate authorization checks, secure archive storage, protected download access, and safeguards against exposing another user\u2019s data. Record the security-relevant export events needed for investigation and compliance.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "security"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "The work involves authorization, protected archive delivery, retention controls, and security-event integration.",
+            "depends_on": [
+              "2"
+            ]
+          },
+          {
+            "temp_id": "4",
+            "title": "Add export controls to Account Settings",
+            "description": "Add a user-facing control in Account Settings to request a data export, show whether generation is pending or complete, and provide the download action when the archive is ready. Explain archive expiration and display actionable errors without exposing sensitive data.",
+            "issue_type": "story",
+            "labels": [
+              "frontend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "The UI requires request, status, and download states plus integration with the asynchronous export API.",
+            "depends_on": [
+              "2"
+            ]
+          },
+          {
+            "temp_id": "5",
+            "title": "Verify export completeness and privacy protections",
+            "description": "Add automated and reviewable test coverage that validates every inventoried personal-data source appears in the archive, archive generation handles representative large and failing datasets, and unauthorized users cannot request or download another account\u2019s export. Include regression checks for archive expiration and sensitive-data leakage in errors or logs.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "security"
+            ],
+            "estimate_story_points": 8,
+            "estimate_rationale": "Coverage must span data completeness, asynchronous failures, authorization boundaries, expiration, and leakage checks across the export workflow.",
+            "depends_on": [
+              "2",
+              "3"
+            ]
+          },
+          {
+            "temp_id": "6",
+            "title": "Document export coverage and operations",
+            "description": "Document the supported personal-data sources, archive format, retention period, operational monitoring, failure recovery, and procedure for updating the inventory when new personal-data storage is introduced. Provide material suitable for engineering operations and legal or compliance review.",
+            "issue_type": "task",
+            "labels": [
+              "docs"
+            ],
+            "estimate_story_points": 3,
+            "estimate_rationale": "The scope is bounded documentation and operational guidance based on the implemented export behavior.",
+            "depends_on": [
+              "5"
+            ]
+          }
+        ],
+        "judgment": {
+          "completeness_reasoning": "The plan covers all aspects of the original proposal, including identifying data sources, creating a secure export mechanism, user interface integration, verification of completeness and privacy, and documentation. It demonstrates thorough planning with clear dependencies between tasks.",
+          "completeness": 5,
+          "non_redundancy_reasoning": "The plan is concise, avoiding unnecessary or redundant issues. Each issue addresses a distinct aspect of the implementation, ensuring that all necessary components are covered without overlap.",
+          "non_redundancy": 5,
+          "dependency_correctness_reasoning": "Dependencies are logically set up, with foundational tasks (inventory and build) preceding dependent ones (security, user interface, verification). This structure ensures a coherent workflow and minimizes potential integration issues.",
+          "dependency_correctness": 5,
+          "estimate_reasonableness_reasoning": "Estimates appear proportionate to the work described. The inventory task is appropriately lightweight given its importance for subsequent steps, while more complex tasks like building the export feature or verification have higher estimates reflecting their complexity and critical nature.",
+          "estimate_reasonableness": 4
+        }
+      }
+    },
+    {
+      "case": "brownfield-with-constraint",
+      "challenge": "Coverage + ordering: schema change, three consumers, and a downstream job. Tests whether the plan notices the accounting export at all.",
+      "single": {
+        "issue_count": 7,
+        "llm_calls": 1,
+        "revision_rounds": 0,
+        "latency_seconds": 10.86,
+        "degraded": false,
+        "error": null,
+        "epic_title": "Enable multi-currency checkout and financial processing",
+        "issues": [
+          {
+            "temp_id": "1",
+            "title": "Define supported currencies and conversion rules",
+            "description": "Specify the supported ISO 4217 currencies, minor-unit precision, exchange-rate source, rate freshness, rounding behavior, and policy for refunds and recurring subscription charges. Document the rules as the contract that checkout, persistence, and exports will implement.",
+            "issue_type": "task",
+            "labels": [
+              "backend"
+            ],
+            "estimate_story_points": 3,
+            "estimate_rationale": "The main uncertainty is agreeing on currency coverage, rate sourcing, and financial rounding behavior before implementation.",
+            "depends_on": []
+          },
+          {
+            "temp_id": "2",
+            "title": "Extend monetary persistence with currency metadata",
+            "description": "Update orders, refunds, and subscriptions so each stored monetary amount has an explicit ISO currency code while retaining integer minor-unit representation. Add validation and application-level invariants that prevent mismatched currencies between an order and its refunds or subscription charges.",
+            "issue_type": "task",
+            "labels": [
+              "backend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "This spans three financial tables, model validation, and compatibility with existing payment and subscription flows.",
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "3",
+            "title": "Migrate existing financial records to USD",
+            "description": "Backfill all existing order, refund, and subscription monetary records with USD and update schemas, indexes, constraints, and rollback handling for the new currency fields. Verify that migrated amounts are unchanged and that existing reads, writes, and reporting continue to work.",
+            "issue_type": "task",
+            "labels": [
+              "backend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "The work involves production-safe data migration, compatibility handling, and verification across multiple tables.",
+            "depends_on": [
+              "2"
+            ]
+          },
+          {
+            "temp_id": "4",
+            "title": "Add currency selection and localized checkout pricing",
+            "description": "Add a checkout currency selector for supported currencies and display item, tax, shipping, discount, and total amounts in the selected currency. Obtain conversion rates according to the defined policy, show the applicable currency to the customer, and pass the selected currency through payment creation.",
+            "issue_type": "story",
+            "labels": [
+              "frontend",
+              "backend"
+            ],
+            "estimate_story_points": 8,
+            "estimate_rationale": "This crosses checkout UI, pricing calculations, exchange-rate integration, payment creation, and localized money formatting.",
+            "depends_on": [
+              "1",
+              "2"
+            ]
+          },
+          {
+            "temp_id": "5",
+            "title": "Persist multi-currency orders, refunds, and subscriptions",
+            "description": "Update order creation, refund processing, and subscription creation/renewal flows to write and read currency-aware minor-unit amounts. Ensure refunds default to the original order currency and subscriptions retain their committed billing currency across future charges.",
+            "issue_type": "story",
+            "labels": [
+              "backend"
+            ],
+            "estimate_story_points": 8,
+            "estimate_rationale": "Multiple transaction lifecycles must be updated while preserving payment-provider, refund, and recurring-billing behavior.",
+            "depends_on": [
+              "2",
+              "3",
+              "4"
+            ]
+          },
+          {
+            "temp_id": "6",
+            "title": "Update accounting exports for multiple currencies",
+            "description": "Remove the single-USD assumption from the accounting export job and include currency code and correctly scaled minor-unit amounts for orders, refunds, and subscription transactions. Update export validation and downstream file or API mappings so multi-currency entries cannot be silently combined or misinterpreted as USD.",
+            "issue_type": "task",
+            "labels": [
+              "backend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "The scope includes export transformations, schema or format compatibility, validation, and downstream integration checks.",
+            "depends_on": [
+              "2",
+              "5"
+            ]
+          },
+          {
+            "temp_id": "7",
+            "title": "Verify end-to-end multi-currency financial behavior",
+            "description": "Add automated coverage for supported-currency checkout, conversion and rounding, persistence, refunds, subscription renewals, USD migration, and accounting exports. Include regression cases proving existing USD checkout and exports produce unchanged monetary values.",
+            "issue_type": "task",
+            "labels": [
+              "backend",
+              "frontend"
+            ],
+            "estimate_story_points": 5,
+            "estimate_rationale": "Testing spans several services and financial flows, including migration and backward-compatibility scenarios.",
+            "depends_on": [
+              "3",
+              "5",
+              "6"
+            ]
+          }
+        ],
+        "judgment": {
+          "completeness_reasoning": "The plan covers all the key components of the proposal, including currency selection, storage changes, migrations, and export updates. It also includes verification which is crucial for a financial system change.",
+          "completeness": 5,
+          "non_redundancy_reasoning": "Each task or story in the plan addresses distinct aspects of implementing multi-currency support without overlap. The dependencies are logical and ensure that foundational work is done before more complex tasks are tackled.",
+          "non_redundancy": 5,
+          "dependency_correctness_reasoning": "Dependencies between issues make sense; for example, extending monetary persistence (task 2) logically depends on defining supported currencies (task 1), and updating accounting exports (task 6) requires the completion of tasks that implement multi-currency in other areas.",
+          "dependency_correctness": 5,
+          "estimate_reasonableness_reasoning": "The point estimates appear to be proportionate to the complexity described for each task or story. The larger points assigned to stories involving user interface changes and complex flow updates (tasks 4 and 5) reflect their greater complexity and integration challenges.",
+          "estimate_reasonableness": 5
+        }
+      },
+      "multiagent": {
+        "issue_count": 9,
+        "llm_calls": 4,
+        "revision_rounds": 1,
+        "latency_seconds": 50.38,
+        "degraded": false,
+        "error": null,
+        "epic_title": "Enable multi-currency checkout and accounting",
+        "issues": [
+          {
+            "temp_id": "1",
+            "title": "Define supported currencies and conversion rules",
+            "description": "Document the supported currency list, currency selection behavior, exchange-rate source, rate freshness requirements, and rounding rules for each currency. Use this policy as the contract for checkout, billing, persistence, and exports.",
+            "issue_type": "task",
+            "labels": [],
+            "estimate_story_points": null,
+            "estimate_rationale": null,
+            "depends_on": []
+          },
+          {
+            "temp_id": "2",
+            "title": "Store currency with monetary records",
+            "description": "Extend orders, refunds, and subscriptions to persist an explicit ISO currency code alongside integer minor-unit amounts, and migrate all existing records as USD. Update models, database constraints, and data-access paths so currency cannot be silently omitted.",
+            "issue_type": "task",
+            "labels": [],
+            "estimate_story_points": 5,
+            "estimate_rationale": "Requires coordinated schema, migration, model, and data-access changes across multiple monetary record types.",
+            "depends_on": [
+              "1"
+            ]
+          },
+          {
+            "temp_id": "3",
+            "title": "Add currency-aware checkout pricing",
+            "description": "Let checkout determine the customer\u2019s selected or assigned supported currency, calculate prices using the approved conversion policy, and display formatted amounts with the correct currency precision. Ensure order creation carries the selected currency and final charged minor-unit amount.",
+            "issue_type": "story",
+            "labels": [],
+            "estimate_story_points": 8,
+            "estimate_rationale": "Spans currency selection, conversion and formatting logic, checkout presentation, and order creation integration.",
+            "depends_on": [
+              "1",
+              "2",
+              "9"
+            ]
+          },
+          {
+            "temp_id": "4",
+            "title": "Charge payments in the order currency",
+            "description": "Update payment-provider requests and result handling to use each order\u2019s currency and minor-unit amount rather than a global USD assumption. Reject unsupported currencies or mismatched provider responses and retain the currency used for the completed transaction.",
+            "issue_type": "story",
+            "labels": [],
+            "estimate_story_points": 5,
+            "estimate_rationale": "Requires payment-provider integration changes and validation of currency and amount consistency.",
+            "depends_on": [
+              "2",
+              "3"
+            ]
+          },
+          {
+            "temp_id": "5",
+            "title": "Support refunds in the original currency",
+            "description": "Update refund creation and validation to use the order\u2019s recorded currency, including partial refunds and remaining-balance checks in integer minor units. Display refund amounts with the correct currency and persist the refund currency for downstream consumers.",
+            "issue_type": "story",
+            "labels": [],
+            "estimate_story_points": 5,
+            "estimate_rationale": "Involves refund validation, integer minor-unit calculations, UI formatting, and persistence updates.",
+            "depends_on": [
+              "2",
+              "4"
+            ]
+          },
+          {
+            "temp_id": "6",
+            "title": "Bill subscriptions in their original currency",
+            "description": "Carry the subscription currency through creation, renewal, invoice, and cancellation flows so recurring charges use the currency agreed at signup. Prevent renewal logic from falling back to USD and expose the currency on subscription billing records.",
+            "issue_type": "story",
+            "labels": [],
+            "estimate_story_points": 8,
+            "estimate_rationale": "Touches subscription lifecycle, renewal and invoice generation, payment charging, and billing-record persistence.",
+            "depends_on": [
+              "2",
+              "4"
+            ]
+          },
+          {
+            "temp_id": "7",
+            "title": "Generate currency-aware accounting exports",
+            "description": "Update the accounting export job to emit currency codes and currency-specific minor-unit amounts for orders, refunds, and subscription transactions. Preserve historical USD export semantics, remove single-currency assumptions, and define handling for missing currency data.",
+            "issue_type": "task",
+            "labels": [],
+            "estimate_story_points": 5,
+            "estimate_rationale": "Requires changes to export mappings and reconciliation behavior across several monetary transaction types.",
+            "depends_on": [
+              "2",
+              "5",
+              "6"
+            ]
+          },
+          {
+            "temp_id": "8",
+            "title": "Validate multi-currency billing end to end",
+            "description": "Add automated coverage for currency selection, conversion and rounding, persistence, payment charging, partial refunds, subscription renewals, historical USD data, and accounting export reconciliation. Include currencies with different minor-unit precision and unsupported-currency cases.",
+            "issue_type": "task",
+            "labels": [],
+            "estimate_story_points": 5,
+            "estimate_rationale": "Covers broad cross-flow integration testing, including precision variants, legacy data, and failure cases.",
+            "depends_on": [
+              "3",
+              "4",
+              "5",
+              "6",
+              "7"
+            ]
+          },
+          {
+            "temp_id": "9",
+            "title": "Integrate the approved exchange-rate source",
+            "description": "Implement the exchange-rate integration for the approved provider, including retrieving rates within the required freshness window and making them available to checkout and billing conversion flows. Define and handle unavailable, stale, invalid, or failed rate responses so conversions do not silently use unsafe values.",
+            "issue_type": "task",
+            "labels": [],
+            "estimate_story_points": 5,
+            "estimate_rationale": "Requires provider integration, freshness validation, rate availability handling, and reusable service wiring for conversion flows.",
+            "depends_on": [
+              "1"
+            ]
+          }
+        ],
+        "judgment": {
+          "completeness_reasoning": "The plan covers all aspects of multi-currency support as outlined in the proposal, including currency selection, storage, processing, and accounting exports. It also addresses conversion and rounding rules, which are crucial for maintaining accuracy.",
+          "completeness": 5,
+          "non_redundancy_reasoning": "Each issue is distinct and necessary to achieve the goals of the epic without unnecessary duplication or padding. The tasks and stories build upon each other logically and efficiently.",
+          "non_redundancy": 5,
+          "dependency_correctness_reasoning": "Dependencies are clearly defined and logically structured, ensuring that foundational work (like defining supported currencies and conversion rules) is completed before dependent tasks (such as storing currency with monetary records).",
+          "dependency_correctness": 5,
+          "estimate_reasonableness_reasoning": "The estimates provided for each task and story appear proportionate to the complexity of the work described. For example, more complex stories like adding currency-aware checkout pricing are appropriately estimated higher (8 pts) compared to less complex tasks (5 pts). The unestimated policy definition is a reasonable choice given its foundational nature.",
+          "estimate_reasonableness": 4
+        }
+      }
+    }
+  ],
+  "means": {
+    "single": {
+      "completeness": 4.75,
+      "non_redundancy": 5,
+      "dependency_correctness": 4.88,
+      "estimate_reasonableness": 4.12,
+      "mean_llm_calls": 1,
+      "mean_latency_seconds": 9.54,
+      "mean_issue_count": 5.5,
+      "degraded_count": 0,
+      "judged_count": 8
+    },
+    "multiagent": {
+      "completeness": 4.38,
+      "non_redundancy": 5,
+      "dependency_correctness": 4.75,
+      "estimate_reasonableness": 3.88,
+      "mean_llm_calls": 2.5,
+      "mean_latency_seconds": 19.79,
+      "mean_issue_count": 5.5,
+      "degraded_count": 0,
+      "judged_count": 8,
+      "mean_revision_rounds": 0.25
+    },
+    "deltas": {
+      "completeness": -0.37,
+      "non_redundancy": 0,
+      "dependency_correctness": -0.13,
+      "estimate_reasonableness": -0.24
+    }
+  }
+}

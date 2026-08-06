@@ -11,6 +11,12 @@ Three-stage pipeline, deliberately split so only the first stage touches the LLM
 Nothing in this module writes to a database — the whole point is to hand back a complete preview the
 caller can edit and choose whether to commit, mirroring `app/drafting/service.py`'s "AI drafts, human
 approves" shape for a single task, scaled up to a whole epic.
+
+`critique_plan` / `plan_needs_revision` / `critique_to_instruction` below are the
+building blocks of the *alternative* multi-agent path (`app/planning/graph.py`, off by default behind
+`epic_planning_multiagent_enabled`). They live here rather than in that module on purpose: they are
+ordinary async functions with no graph dependency, unit-testable exactly like `plan_epic` is, so the
+LangGraph layer is left owning only orchestration.
 """
 from __future__ import annotations
 
@@ -19,8 +25,12 @@ import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from app.planning.prompts import render_epic_plan_prompt, render_epic_plan_refine_prompt
-from app.planning.schemas import EpicDraft, EpicPlanDraft, IssueDraft
+from app.planning.prompts import (
+    render_critic_prompt,
+    render_epic_plan_prompt,
+    render_epic_plan_refine_prompt,
+)
+from app.planning.schemas import EpicDraft, EpicPlanDraft, IssueDraft, PlanCritique
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +39,10 @@ logger = logging.getLogger(__name__)
 # multi-issue decomposition is a meaningfully larger structured output than a single task draft.
 _MAX_VALIDATION_RETRIES = 2
 _MAX_OUTPUT_TOKENS = 8000
+# The critic emits four short evidence lists, not a full epic decomposition — so it gets
+# app/sprint_health/service.py's smaller budget rather than reusing the 8000 above, which was sized
+# for the whole plan.
+_MAX_REVIEW_OUTPUT_TOKENS = 2000
 
 
 @dataclass(slots=True)
@@ -142,6 +156,72 @@ async def refine_plan(
             latency_seconds=time.perf_counter() - start,
             error=str(exc),
         )
+
+
+@dataclass(slots=True)
+class CritiqueResult:
+    critique: PlanCritique
+    error: Optional[str] = None
+
+
+async def critique_plan(
+    client, model: str, proposal: str, epic: EpicDraft, issues: List[IssueDraft]
+) -> CritiqueResult:
+    """Reviews a plan and reports findings only — never edits it. On failure, returns an *empty*
+    critique with `error` set, which `plan_needs_revision` reads as "nothing to revise": a broken
+    reviewer must not be able to force revision rounds, and it must not block a plan that was
+    probably fine.
+    """
+    user_message = f"Original proposal:\n{proposal}\n\nCurrent plan:\n{_render_current_plan(epic, issues)}"
+    try:
+        critique = await client.chat.completions.create(
+            model=model,
+            response_model=PlanCritique,
+            max_retries=_MAX_VALIDATION_RETRIES,
+            max_tokens=_MAX_REVIEW_OUTPUT_TOKENS,
+            messages=[
+                {"role": "system", "content": render_critic_prompt()},
+                {"role": "user", "content": user_message},
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001 - a failed review must not block an otherwise fine plan
+        logger.warning(
+            "plan critique failed after retries; treating the plan as approved",
+            extra={"error": str(exc)},
+        )
+        return CritiqueResult(critique=PlanCritique(), error=str(exc))
+    return CritiqueResult(critique=critique)
+
+
+def plan_needs_revision(critique: PlanCritique) -> bool:
+    """The graph's loop-back condition, deliberately computed here in plain Python rather than read
+    off a self-reported `approved` field the model sets (see `PlanCritique`'s docstring). Any concrete
+    finding in any category is worth one revision pass.
+    """
+    return bool(
+        critique.coverage_gaps
+        or critique.redundant_issue_groups
+        or critique.unrealistic_estimates
+        or critique.missing_dependencies
+    )
+
+
+def critique_to_instruction(critique: PlanCritique) -> str:
+    """Renders a critique into the same free-text instruction shape `refine_plan` already consumes,
+    so the revision pass reuses the existing refine prompt/template instead of needing a third
+    "revise from a critique" prompt that would then have to be kept in sync with it.
+    """
+    lines: List[str] = []
+    for gap in critique.coverage_gaps:
+        lines.append(f"- Add work covering a gap in the plan: {gap}")
+    for group in critique.redundant_issue_groups:
+        if len(group) > 1:
+            lines.append(f"- Merge these overlapping issues into one: {', '.join(group)}")
+    for item in critique.unrealistic_estimates:
+        lines.append(f"- Re-estimate issue {item.temp_id}: {item.reason}")
+    for dep in critique.missing_dependencies:
+        lines.append(f"- Make issue {dep.temp_id} depend on {dep.likely_depends_on}: {dep.reason}")
+    return "A plan review flagged the following. Apply each one:\n" + "\n".join(lines)
 
 
 def validate_and_order(issues: List[IssueDraft]) -> List[IssueDraft]:

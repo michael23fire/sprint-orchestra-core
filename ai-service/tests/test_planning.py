@@ -7,20 +7,50 @@ dependency cycles deterministically instead of failing; (4) `allocate_sprints` b
 both in open-ended (capacity-driven) mode and fixed-sprint-count mode.
 """
 from app.planning.prompts import render_epic_plan_prompt, render_epic_plan_refine_prompt
-from app.planning.schemas import EpicDraft, EpicPlanDraft, IssueDraft
-from app.planning.service import allocate_sprints, plan_epic, refine_plan, validate_and_order
+from app.planning.schemas import (
+    EpicDraft,
+    EpicPlanDraft,
+    IssueDraft,
+    MissingDependency,
+    PlanCritique,
+    UnrealisticEstimate,
+)
+from app.planning.service import (
+    allocate_sprints,
+    critique_plan,
+    critique_to_instruction,
+    plan_epic,
+    plan_needs_revision,
+    refine_plan,
+    validate_and_order,
+)
 
 
 class _FakeCompletions:
+    """Accepts either a single result (returned/raised for every call, the original behaviour every
+    single-call test here relies on) or a dict of {response_model: [result, ...]} queues — the graph
+    tests need the latter because planner and critic are each called several times across a revision
+    loop, with a different answer each round.
+    """
+
     def __init__(self, result):
-        self._result = result
+        self._result = result if not isinstance(result, dict) else None
+        self._queues = (
+            {k: (list(v) if isinstance(v, list) else v) for k, v in result.items()}
+            if isinstance(result, dict)
+            else None
+        )
         self.calls = []
 
     async def create(self, **kwargs):
         self.calls.append(kwargs)
-        if isinstance(self._result, Exception):
-            raise self._result
-        return self._result
+        result = self._result
+        if self._queues is not None:
+            queued = self._queues[kwargs["response_model"]]
+            result = queued if isinstance(queued, Exception) else queued.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 class _FakeChat:
@@ -185,3 +215,66 @@ def test_allocate_sprints_respects_target_sprint_count():
 
 def test_allocate_sprints_returns_empty_list_for_no_issues():
     assert allocate_sprints([], sprint_capacity_points=10) == []
+
+
+# --- Multi-agent path building blocks (see app/planning/graph.py for how they're wired together) ---
+
+_EPIC = EpicDraft(title="Add dark mode", description="Support a dark theme app-wide.", goals=[])
+
+
+async def test_critique_plan_returns_the_findings_and_sees_both_proposal_and_plan():
+    critique = PlanCritique(coverage_gaps=["no issue covers data migration"])
+    client = FakeInstructorClient(critique)
+
+    result = await critique_plan(client, "fake-model", "Add dark mode everywhere", _EPIC, [_issue("1")])
+
+    assert result.critique == critique
+    assert result.error is None
+    sent = client.completions.calls[0]["messages"][1]["content"]
+    assert "Add dark mode everywhere" in sent  # the original proposal, needed to judge coverage
+    assert "[1]" in sent  # the current plan's issues
+
+
+async def test_critique_plan_treats_a_failed_review_as_approved_rather_than_blocking_the_plan():
+    client = FakeInstructorClient(RuntimeError("model unreachable"))
+
+    result = await critique_plan(client, "fake-model", "proposal", _EPIC, [_issue("1")])
+
+    assert result.error == "model unreachable"
+    assert plan_needs_revision(result.critique) is False
+
+
+def test_plan_needs_revision_is_false_for_an_empty_critique():
+    assert plan_needs_revision(PlanCritique()) is False
+
+
+def test_plan_needs_revision_is_true_for_a_finding_in_any_single_category():
+    assert plan_needs_revision(PlanCritique(coverage_gaps=["missing migration"])) is True
+    assert plan_needs_revision(PlanCritique(redundant_issue_groups=[["1", "2"]])) is True
+    assert plan_needs_revision(
+        PlanCritique(unrealistic_estimates=[UnrealisticEstimate(temp_id="1", reason="way too small")])
+    ) is True
+    assert plan_needs_revision(
+        PlanCritique(missing_dependencies=[MissingDependency(temp_id="2", likely_depends_on="1", reason="needs the API")])
+    ) is True
+
+
+def test_critique_to_instruction_renders_every_category_into_the_refine_instruction_shape():
+    instruction = critique_to_instruction(
+        PlanCritique(
+            coverage_gaps=["no issue covers data migration"],
+            redundant_issue_groups=[["2", "3"]],
+            unrealistic_estimates=[UnrealisticEstimate(temp_id="4", reason="13 points for a config toggle")],
+            missing_dependencies=[MissingDependency(temp_id="5", likely_depends_on="1", reason="needs the API first")],
+        )
+    )
+
+    assert "no issue covers data migration" in instruction
+    assert "2, 3" in instruction
+    assert "13 points for a config toggle" in instruction
+    assert "5" in instruction and "needs the API first" in instruction
+
+
+def test_critique_to_instruction_skips_a_single_item_redundancy_group():
+    # A one-element "group" is not a merge instruction — emitting "merge these: 2" would be nonsense.
+    assert "Merge" not in critique_to_instruction(PlanCritique(redundant_issue_groups=[["2"]]))

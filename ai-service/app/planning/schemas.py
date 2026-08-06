@@ -9,6 +9,11 @@ without adding independence between the two outputs.
 `depends_on` deliberately references other issues' `temp_id` (scoped to this response only), never an
 issue key — the LLM has no real issue keys to reference yet, nothing is persisted until the human
 reviews and confirms the whole plan.
+
+That "one call, not two" claim above was put under test rather than left as an assumption:
+`app/planning/graph.py` briefly split estimation into its own node and
+`eval/planning_multiagent_eval.py` measured it. The split produced no improvement at all (delta 0.00),
+so the node was deleted and this docstring's original reasoning stands — now with a number behind it.
 """
 from __future__ import annotations
 
@@ -78,4 +83,57 @@ class EpicPlanDraft(BaseModel):
         ..., min_length=1,
         description="A decomposition of the epic into concrete, independently workable issues — "
                     "typically 3 to 12 depending on the proposal's scope.",
+    )
+
+
+# --- Multi-agent planning graph (app/planning/graph.py) schemas ---
+#
+# These back the planner -> critic pipeline, an alternative to the single-call `plan_epic` above.
+# `EpicDraft`/`IssueDraft`/`EpicPlanDraft` are reused as-is by both nodes — the planner emits an
+# `EpicPlanDraft` exactly as before, so only the critic's own output needs a new shape.
+
+
+class UnrealisticEstimate(BaseModel):
+    temp_id: str = Field(..., description="The issue whose estimate looks off.")
+    reason: str = Field(..., description="Why this estimate looks too small or too large for the work described.")
+
+
+class MissingDependency(BaseModel):
+    temp_id: str = Field(..., description="The issue that is likely missing a depends_on edge.")
+    likely_depends_on: str = Field(..., description="The other issue's temp_id it probably needs to wait on.")
+    reason: str = Field(..., description="Why this ordering is likely required.")
+
+
+class PlanCritique(BaseModel):
+    """Evidence only — deliberately has no self-reported verdict field (e.g. `approved: bool`). A
+    model asked to both list problems AND declare a verdict can produce an internally inconsistent
+    answer (a real gap listed, verdict still "approved"). Whether the plan needs another revision
+    round is instead computed from these lists by `app.planning.service.plan_needs_revision`, a plain,
+    independently unit-tested function — the same "LLM lists evidence, code computes the verdict"
+    split `app.sprint_health.service`'s risk-level handling already uses.
+
+    Every list field follows this codebase's existing Optional/List convention throughout
+    `IssueDraft`: an empty list is a correct, positive statement that nothing of that kind was found —
+    never invent a problem just to appear thorough.
+    """
+
+    coverage_gaps: List[str] = Field(
+        default_factory=list,
+        description="Concrete, missing pieces of work the proposal implies but the plan doesn't cover. "
+                    "Empty is correct when the decomposition is genuinely complete.",
+    )
+    redundant_issue_groups: List[List[str]] = Field(
+        default_factory=list,
+        description="Groups (by temp_id) of issues that substantially overlap and should likely be "
+                    "merged. Empty is correct when there's no real overlap.",
+    )
+    unrealistic_estimates: List[UnrealisticEstimate] = Field(
+        default_factory=list,
+        description="Estimates that look clearly too small or too large for the described scope. "
+                    "Empty is correct when every estimate looks reasonable (or is null).",
+    )
+    missing_dependencies: List[MissingDependency] = Field(
+        default_factory=list,
+        description="Issue pairs that are very likely to need a depends_on edge the plan doesn't "
+                    "have. Empty is correct when the ordering already given looks right.",
     )
