@@ -1,0 +1,108 @@
+name: CI
+
+# Runs on every push and PR — the guardrail that would have caught the backfill_jira_backend.py bug
+# (see docs/RAG_ACCURACY_CASE_STUDIES.md) before it ever touched real data: that bug had a real
+# regression test written for it, but nothing ran that test automatically until now.
+on:
+  push:
+  pull_request:
+
+jobs:
+  ai-service:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-service
+    # Same postgres:poc/poc123/pocdb shape as the jira-backend job below — without this service,
+    # tests/test_rollout_graph.py's and tests/test_sprint_recovery_graph.py's real AsyncPostgresSaver
+    # crash-resume tests (the actual proof of the durable-execution/idempotency claims in Case Studies
+    # 31-32, not just an assertion) `pytest.importorskip`/connect-and-skip instead of running — this
+    # service is what turns those from "developer has Postgres running locally" into an actual CI gate.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: poc
+          POSTGRES_PASSWORD: poc123
+          POSTGRES_DB: pocdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U poc -d pocdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis-stack:
+        image: redis/redis-stack-server:7.4.0-v3
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # RediSearch indexes are supported only on database 0.
+      TEST_REDIS_STACK_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: ai-service/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: pytest -q
+
+  vectorization-service:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vectorization-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: vectorization-service/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: pytest -q
+
+  jira-backend:
+    runs-on: ubuntu-latest
+    # Matches jira-backend/src/main/resources/application.yml's hardcoded datasource credentials
+    # exactly (same poc/poc123/pocdb this project's own local docker-compose already uses), so no
+    # override/profile is needed — Flyway migrates this empty container on app startup like any other
+    # fresh environment.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: poc
+          POSTGRES_PASSWORD: poc123
+          POSTGRES_DB: pocdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U poc -d pocdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - run: ./gradlew :jira-backend:test --no-daemon
+
+  gateway:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - run: ./gradlew :gateway:test --no-daemon

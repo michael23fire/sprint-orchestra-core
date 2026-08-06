@@ -76,8 +76,8 @@ since it demonstrably didn't help; kept the default.
 The lesson worth stating plainly: the original guess was plausible-sounding and wrong. Actually
 measuring the stage breakdown — not re-guessing harder — is what found the real answer.
 
-Zero failures at 50 concurrent users is the actual "production grade" evidence for this endpoint —
-not a claim, a number.
+Zero failures at 50 concurrent users is controlled prototype-scale evidence for this endpoint. The
+number is useful, but a 30-second single-machine run is not a production-grade capacity or SLO claim.
 
 ## 2. ai-service `/ask` — found 2 real bugs, fixed both, and hit a real environment limit
 

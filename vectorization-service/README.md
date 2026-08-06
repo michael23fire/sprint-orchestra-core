@@ -70,9 +70,40 @@ jira-backend ──(AFTER_COMMIT)──▶ Kafka: jira.content.ingestion ──�
   enabled, reused here as an attachment-pipeline test harness against real data. OCR and
   table-structure models are **off by default** (`VEC_DOCLING_DO_OCR`/`VEC_DOCLING_DO_TABLE_STRUCTURE`)
   — a real per-file cost, not free, so opt in per deployment.
+- **VLM fallback for images OCR couldn't recover** (`VEC_VLM_OCR_ENABLED`, off by default,
+  `app/ingest/vlm_describer.py`) — a confidence threshold filters garbled OCR fragments (see below),
+  but can only turn a wrong value into a missing one; it can't recover the value OCR never actually
+  read. When EasyOCR shows a concrete sign of struggling on a specific image (some detections dropped
+  as low-confidence, or nothing survived at all), the whole image escalates to a vision-language model
+  that can respond "illegible" instead of guessing a character sequence — the actual capability
+  character-level OCR is missing. Verified against a real degraded test photo end-to-end through the
+  real vector store and a live `/ask` call: went from a confidently wrong SKU answer ("Mx 62") to the
+  correct value ("W-7734") — see `docs/RAG_ACCURACY_CASE_STUDIES.md` Case Studies 27/30.
+- **Selective PDF-page VLM fallback** (`VEC_VLM_PDF_ENABLED`, also off by default) — Docling stays
+  first for born-digital PDFs. For scanned or visual-heavy PDFs, PyMuPDF identifies low-text and
+  visual pages, renders only those pages to PNG (200 DPI by default, capped at 12 pages), and sends
+  them through the same VLM extraction path. If every page is scan-like, page-labelled VLM Markdown
+  replaces unusable Docling output; for mixed documents it appends only the missing page facts to
+  good Docling text. VLM output is content-addressed and persisted in `vlm_result_cache`, so a Kafka
+  retry after a crash reuses the completed extraction rather than issuing another paid call. Enable
+  both `VEC_VLM_OCR_ENABLED=true` and `VEC_VLM_PDF_ENABLED=true`; configure the page cap for your
+  spend/latency budget.
+- **PDF page provenance** — `chunks.page_number` stores a nullable, one-based source page when it
+  is known. Docling PDF output is exported page-by-page when its document provenance map is
+  available; VLM-rendered pages carry the same page metadata. A page-derived chunk begins with a
+  readable label such as
+  `[Attachment: invoice.pdf — issue ATC-46 — PDF page 2]`, and `/search` plus
+  `/issues/attachments` return the same `page_number` metadata for citation/UI deep links. Only a
+  parser result with no trustworthy page map remains `null`; we do not infer page numbers from
+  flattened text.
+- **Typed attachment provenance** — every attachment chunk also carries a JSONB `provenance` locator:
+  PPTX uses `slide_number`, XLSX uses `sheet_name` plus the workbook's used `cell_range` when it can
+  be read, DOCX uses renderer-reported page provenance when available, and images use a pixel `bbox`.
+  `/search`, `/issues/attachments`, and RAG citations preserve this object. A locator is omitted
+  rather than guessed when a format cannot provide a stable coordinate.
 - **Metadata on every chunk** — `space_id` (for the same per-space permission filter the FTS path
-  uses), `chunk_type`, `source_id`, `issue_key` — so a retrieval hit can be filtered by access and
-  linked back to a clickable source.
+  uses), `chunk_type`, `source_id`, `issue_key`, and attachment provenance — so a retrieval hit can
+  be filtered by access and linked back to a clickable source.
 
 ## Hybrid retrieval (dense + lexical, fused with RRF)
 
@@ -192,10 +223,11 @@ special-case handling.
 
 **Measured** (50 concurrent requests, `loadtest/locustfile_vectorization.py` — see
 `../loadtest/README.md` for the full methodology): reranking on vs. off moved P50 latency by only
-~10ms (620ms vs. 610ms) and P95 by ~50ms (820ms vs. 770ms) at this load — the cross-encoder is not the
-bottleneck; the shared `asyncpg` connection pool (`VEC_PG_POOL_MAX_SIZE`, default 8) is the more likely
-next tuning lever if latency needs to come down further, since 50 concurrent requests sharing 8 pooled
-connections queue for a connection before the reranker (or the database) ever runs.
+~10ms (620ms vs. 610ms) and P95 by ~50ms (820ms vs. 770ms) at this load — the cross-encoder was not the
+bottleneck. A follow-up increased the `asyncpg` pool from 8 to 32 and made P95 worse (1400ms); stage
+metrics measured PostgreSQL retrieval at 5ms P95 and the local embedding call at 2.48s P95. The pool
+change was reverted. The measured bottleneck in this setup is single-process local embedding
+inference, not the database; see `../loadtest/README.md`.
 
 ## Embeddings
 
@@ -246,6 +278,12 @@ curl localhost:8100/healthz
 | GET    | `/metrics` | Prometheus text-format metrics (request latency, per-stage search timings) — see Observability below |
 | POST   | `/search`  | Raw retrieval: `{query, space_ids, limit, mode}` → ranked chunk hits with citation metadata |
 | POST   | `/embed`   | Raw embedding primitive: `{text}` → `{embedding, dim}`. Exposed so `ai-service`'s semantic query cache can embed questions without duplicating an embedding provider — see `ai-service/app/cache/`. |
+| POST   | `/issues/query` | Exact, space-scoped issue counts, filters, ordering, and current-state samples |
+| POST   | `/issues/history` | Append-only issue transitions with time/event filters and reopened detection |
+| POST   | `/issues/comments` | Citation-bearing comments for exact issue keys |
+| POST   | `/issues/details` | Citation-bearing title/description text for exact issue keys |
+| POST   | `/issues/attachments` | Citation-bearing extracted attachment text for exact issue keys |
+| POST   | `/sprints/query` | Exact, space-scoped sprint state and counts |
 
 ## Observability
 
@@ -366,6 +404,6 @@ pytest        # chunker, RRF fusion, pipeline idempotency, contextual retrieval 
   `VEC_RERANK_ENABLED=true`, `SearchHit.score` in the response is whatever `ms-marco-MiniLM-L-6-v2`
   outputs (commonly negative), not a probability. Fine for *ranking* (higher is more relevant), not
   meaningful as an absolute confidence number — don't threshold on it without recalibrating.
-- **50-concurrent-user load test passed with zero failures** (`../loadtest/README.md`) — the one claim
-  in this README backed by an adversarial test specifically designed to break it, not just normal
-  usage during development.
+- **Prototype-scale load evidence, not a production capacity claim.** A 30-second, single-machine,
+  50-concurrent-user run completed 1,702 requests with zero failures. It is useful regression and
+  bottleneck evidence; it is not a soak test or a production SLO/capacity result.

@@ -5,17 +5,24 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from typing import AsyncIterator, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from langgraph.types import Command
 from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
 from opentelemetry import trace
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
+from app.auth.space_membership import SpaceMembershipError
 from app.drafting.service import draft_task
 from app.observability import CACHE_HITS_TOTAL, CACHE_LOOKUP_SECONDS
+from app.planning.graph import plan_epic_multiagent
+from app.planning.rollout_graph import ON_STAGE_VAR as ROLLOUT_ON_STAGE_VAR
+from app.planning.rollout_graph import retry_rollout
+from app.planning.rollout_schemas import initial_rollout_state
 from app.planning.schemas import EpicDraft, IssueDraft
 from app.planning.service import allocate_sprints, plan_epic, refine_plan, validate_and_order
 from app.search.service import DEFAULT_MIN_SCORE, RERANKED_MIN_SCORE, dedupe_by_issue
@@ -69,6 +76,8 @@ class CitationOut(_CamelModel):
     chunk_type: str
     source_id: int
     content: str
+    page_number: int | None = None
+    provenance: dict = Field(default_factory=dict)
 
 
 class StageTimingsOut(_CamelModel):
@@ -89,6 +98,11 @@ class AskResponse(_CamelModel):
     retrieval_rounds: int
     queries_used: List[str]
     citations: List[CitationOut]
+    # Human-readable results of structured tool calls (query_issues/query_sprints/get_issue_history)
+    # this answer actually used — see AgentAnswer.structured_evidence's docstring for why this exists
+    # (RAGAS/eval context needs somewhere to find a structured fact like "ATC-77 is blocked", which
+    # `citations` alone never carries).
+    structured_evidence: List[str] = []
     input_tokens: int
     output_tokens: int
     estimated_cost_usd: float
@@ -98,6 +112,7 @@ class AskResponse(_CamelModel):
 
 @router.post("/ask", response_model=AskResponse)
 async def ask(req: AskRequest, request: Request) -> AskResponse:
+    await _authorize_space_ids(request, req.space_ids)
     agent = request.app.state.agent
     cache = request.app.state.cache
     stats = request.app.state.stats
@@ -151,7 +166,7 @@ async def ask(req: AskRequest, request: Request) -> AskResponse:
         # retries are exhausted (including a 400, which is deliberately NOT retried — see that
         # module's docstring), or any other downstream failure (retrieval).
         logger.exception("agent.ask() failed")
-        raise HTTPException(status_code=502, detail=f"ask failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail="AI request failed") from exc
     stats.record(result.usage, result.estimated_cost_usd)
 
     stage_timings = StageTimingsOut(
@@ -166,9 +181,14 @@ async def ask(req: AskRequest, request: Request) -> AskResponse:
         retrieval_rounds=result.retrieval_rounds,
         queries_used=result.queries_used,
         citations=[
-            CitationOut(issue_key=c.issue_key, chunk_type=c.chunk_type, source_id=c.source_id, content=c.content)
+            CitationOut(
+                issue_key=c.issue_key, chunk_type=c.chunk_type, source_id=c.source_id,
+                content=c.content, page_number=c.page_number,
+                provenance=c.provenance,
+            )
             for c in result.citations
         ],
+        structured_evidence=result.structured_evidence,
         input_tokens=result.usage.input_tokens,
         output_tokens=result.usage.output_tokens,
         estimated_cost_usd=result.estimated_cost_usd,
@@ -204,6 +224,7 @@ async def ask_stream(req: AskRequest, request: Request) -> StreamingResponse:
     `on_stage` feeds — the two run concurrently so stage events reach the client in real time instead
     of being collected and replayed after the fact, which would defeat the point.
     """
+    await _authorize_space_ids(request, req.space_ids)
     agent = request.app.state.agent
     cache = request.app.state.cache
     stats = request.app.state.stats
@@ -265,7 +286,7 @@ async def ask_stream(req: AskRequest, request: Request) -> StreamingResponse:
                 logger.exception("agent.ask() failed (stream)")
                 span.record_exception(exc)
                 span.set_status(trace.StatusCode.ERROR, str(exc))
-                yield _sse("error", {"detail": f"ask failed: {exc}"})
+                yield _sse("error", {"detail": "AI request failed"})
                 return
             span.set_attribute(SpanAttributes.OUTPUT_VALUE, result.text)
             span.set_attribute("retrieval_rounds", result.retrieval_rounds)
@@ -283,9 +304,14 @@ async def ask_stream(req: AskRequest, request: Request) -> StreamingResponse:
             retrieval_rounds=result.retrieval_rounds,
             queries_used=result.queries_used,
             citations=[
-                CitationOut(issue_key=c.issue_key, chunk_type=c.chunk_type, source_id=c.source_id, content=c.content)
+                CitationOut(
+                    issue_key=c.issue_key, chunk_type=c.chunk_type, source_id=c.source_id,
+                    content=c.content, page_number=c.page_number,
+                    provenance=c.provenance,
+                )
                 for c in result.citations
             ],
+            structured_evidence=result.structured_evidence,
             input_tokens=result.usage.input_tokens,
             output_tokens=result.usage.output_tokens,
             estimated_cost_usd=result.estimated_cost_usd,
@@ -350,6 +376,7 @@ async def semantic_search_endpoint(req: SemanticSearchRequest, request: Request)
     how that number was grounded in the same live observation) rather than either applying the wrong
     threshold or applying none at all.
     """
+    await _authorize_space_ids(request, req.space_ids)
     retrieval = request.app.state.retrieval
     try:
         # Over-fetch chunks before dedup: several chunks can belong to the same issue, and
@@ -363,8 +390,8 @@ async def semantic_search_endpoint(req: SemanticSearchRequest, request: Request)
         fetch_limit = min(max(req.limit * 5, 30), 50)
         result = await retrieval.search_with_meta(req.query, req.space_ids, limit=fetch_limit, mode="vector")
     except Exception as exc:  # noqa: BLE001 - same clean-502 contract as /ask, don't leak internals
-        logger.warning("semantic search failed", extra={"error": str(exc)})
-        raise HTTPException(status_code=502, detail=f"search failed: {exc}") from exc
+        logger.exception("semantic search failed")
+        raise HTTPException(status_code=502, detail="search request failed") from exc
 
     if req.min_score is not None:
         effective_min_score = req.min_score
@@ -469,12 +496,21 @@ async def plan_epic_endpoint(req: PlanEpicRequest, request: Request) -> PlanEpic
     """AI-assisted epic planning: one structured-output call -> epic + decomposed issues, then two
     deterministic passes (dependency-cycle validation + topological sort, then sprint bin-packing).
 
+    With `epic_planning_multiagent_enabled`, the first step instead runs a LangGraph
+    planner -> estimator -> critic pipeline (app/planning/graph.py). Both paths return the same
+    `PlanResult`, so everything below this line — and the response shape the frontend depends on — is
+    identical either way.
+
     Never 500s on a model/provider failure — see app/planning/service.py's degradation strategy.
     Nothing is persisted here; the caller reviews and commits via the existing issue/sprint/link APIs.
     """
     client = request.app.state.instructor_client
     model = request.app.state.instructor_model
-    result = await plan_epic(client, model, req.proposal, req.existing_labels)
+    planning_graph = getattr(request.app.state, "planning_graph", None)
+    if planning_graph is not None:
+        result = await plan_epic_multiagent(planning_graph, req.proposal, req.existing_labels)
+    else:
+        result = await plan_epic(client, model, req.proposal, req.existing_labels)
     ordered_issues = validate_and_order(result.plan.issues)
     buckets = allocate_sprints(ordered_issues, req.sprint_capacity_points, req.target_sprint_count)
     return PlanEpicResponse(
@@ -553,6 +589,228 @@ async def refine_plan_endpoint(req: RefinePlanRequest, request: Request) -> Plan
         degraded=result.degraded,
         latency_seconds=round(result.latency_seconds, 3),
     )
+
+
+# --- Epic rollout: durable, human-approved commit-to-Jira workflow (app/planning/rollout_graph.py) ---
+# Distinct from /plan-epic above: that endpoint never persists anything (see its own docstring) and
+# returns in one blocking call. This one can pause for an arbitrary real amount of time waiting on a
+# human decision (Postgres-checkpointed, survives an ai-service restart while paused) and, once
+# approved, actually writes the issues to jira-backend — the one place in the planning feature with an
+# irreversible side effect, which is why it is the one place this codebase uses LangGraph's durable-
+# execution primitives rather than a plain function call.
+
+
+class RolloutIssueOut(_CamelModel):
+    temp_id: str
+    title: str
+    description: str
+    issue_type: str
+    labels: List[str]
+    estimate_story_points: Optional[int]
+    estimate_rationale: Optional[str]
+    depends_on: List[str]
+
+
+class RolloutPlanOut(_CamelModel):
+    epic: Optional[EpicDraftOut]
+    issues: List[RolloutIssueOut]
+    sprint_plan: List[SprintBucketOut]
+
+
+class RolloutStatusResponse(_CamelModel):
+    thread_id: str
+    status: str
+    plan: Optional[RolloutPlanOut]
+    epic_issue_key: Optional[str]
+    committed_issue_keys: Dict[str, str]
+    error: Optional[str]
+
+
+def _rollout_status_response(thread_id: str, values: dict) -> RolloutStatusResponse:
+    epic = values.get("epic")
+    issues = values.get("issues") or []
+    plan = RolloutPlanOut(
+        epic=EpicDraftOut(**epic.model_dump()) if epic else None,
+        issues=[RolloutIssueOut(**i.model_dump()) for i in issues],
+        sprint_plan=[SprintBucketOut(**b) for b in values.get("sprint_buckets") or []],
+    )
+    return RolloutStatusResponse(
+        thread_id=thread_id,
+        status=values.get("status", "pending_approval"),
+        plan=plan,
+        epic_issue_key=values.get("epic_issue_key"),
+        committed_issue_keys=values.get("committed") or {},
+        error=values.get("error"),
+    )
+
+
+class PlanRolloutRequest(_CamelModel):
+    proposal: str = Field(min_length=1)
+    existing_labels: List[str] = Field(default_factory=list)
+    sprint_capacity_points: Optional[float] = None
+    target_sprint_count: Optional[int] = Field(None, ge=1)
+    space_id: int = Field(description="The single space this epic's issues will be created in.")
+
+
+def _rollout_graph(request: Request):
+    graph = getattr(request.app.state, "rollout_graph", None)
+    if graph is None:
+        raise HTTPException(status_code=503, detail="epic rollout is disabled (AI_EPIC_ROLLOUT_ENABLED=false)")
+    return graph
+
+
+def _caller_identity(request: Request) -> tuple[str, str]:
+    # Deliberately empty-string, not a placeholder like "internal" — SpaceMembershipChecker.validate's
+    # `if not user_id: return` skip (and review_node's identical recheck) depends on this being falsy
+    # for a direct/internal caller (this project's own eval/demo scripts, bypassing the gateway) to be
+    # treated as trusted, same shape _authorize_space_ids already uses. A non-empty placeholder here
+    # would silently defeat that skip and send a fabricated identity to jira-backend's real membership
+    # endpoint instead.
+    user_id = request.headers.get("x-user-id") or ""
+    username = request.headers.get("x-username") or ""
+    return user_id, username
+
+
+@router.post("/plan-epic/rollout", response_model=RolloutStatusResponse)
+async def start_rollout_endpoint(req: PlanRolloutRequest, request: Request) -> RolloutStatusResponse:
+    """Starts a new durable rollout workflow: generates a plan, then pauses for approval. Always
+    returns with status="pending_approval" (or "failed" if plan generation itself failed) — this call
+    never commits anything, regardless of how the plan looks.
+    """
+    await _authorize_space_ids(request, [req.space_id])
+    graph = _rollout_graph(request)
+    user_id, username = _caller_identity(request)
+    thread_id = str(uuid.uuid4())
+    initial = initial_rollout_state(
+        req.proposal, req.existing_labels, req.sprint_capacity_points, req.target_sprint_count,
+        req.space_id, user_id, username,
+    )
+    config = {"configurable": {"thread_id": thread_id}}
+    await graph.ainvoke(initial, config=config)
+    snap = await graph.aget_state(config)
+    return _rollout_status_response(thread_id, snap.values)
+
+
+@router.post("/plan-epic/rollout/stream")
+async def start_rollout_stream_endpoint(req: PlanRolloutRequest, request: Request) -> StreamingResponse:
+    """SSE variant of POST /plan-epic/rollout — same "stage progress labels, not token streaming"
+    pattern as /ask/stream and /sprint-recovery/start/stream. `plan_node` is the only node here that
+    makes an LLM call (`review` is a pause, `create_epic`/`commit_one` are fast Jira REST writes), so
+    this carries at most one `stage` event before the `result` frame — still worth it since that one
+    call (especially through the multi-agent planner<->critic path, when enabled) is the entire wait.
+    """
+    await _authorize_space_ids(request, [req.space_id])
+    graph = _rollout_graph(request)
+    user_id, username = _caller_identity(request)
+    thread_id = str(uuid.uuid4())
+    initial = initial_rollout_state(
+        req.proposal, req.existing_labels, req.sprint_capacity_points, req.target_sprint_count,
+        req.space_id, user_id, username,
+    )
+    config = {"configurable": {"thread_id": thread_id}}
+
+    async def generate() -> AsyncIterator[str]:
+        stage_queue: asyncio.Queue[str] = asyncio.Queue()
+        token = ROLLOUT_ON_STAGE_VAR.set(stage_queue.put_nowait)
+        try:
+            task = asyncio.create_task(graph.ainvoke(initial, config=config))
+            while not task.done():
+                try:
+                    label = await asyncio.wait_for(stage_queue.get(), timeout=0.2)
+                except asyncio.TimeoutError:
+                    continue
+                yield _sse("stage", {"label": label})
+            while not stage_queue.empty():
+                yield _sse("stage", {"label": stage_queue.get_nowait()})
+            try:
+                task.result()
+            except Exception as exc:  # noqa: BLE001 - clean SSE error frame, same as ask_stream's backstop
+                logger.exception("epic rollout stream failed")
+                yield _sse("error", {"detail": "epic rollout failed"})
+                return
+        finally:
+            ROLLOUT_ON_STAGE_VAR.reset(token)
+        snap = await graph.aget_state(config)
+        yield _sse("result", _rollout_status_response(thread_id, snap.values).model_dump(by_alias=True))
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.get("/plan-epic/rollout/{thread_id}", response_model=RolloutStatusResponse)
+async def get_rollout_status_endpoint(thread_id: str, request: Request) -> RolloutStatusResponse:
+    graph = _rollout_graph(request)
+    config = {"configurable": {"thread_id": thread_id}}
+    snap = await graph.aget_state(config)
+    if not snap.values:
+        raise HTTPException(status_code=404, detail=f"no rollout workflow with thread_id={thread_id}")
+    await _authorize_workflow_state(request, snap.values)
+    return _rollout_status_response(thread_id, snap.values)
+
+
+class RolloutDecisionRequest(_CamelModel):
+    decision: Literal["approve", "edit", "reject"]
+    epic: Optional[EpicDraftIn] = None
+    issues: Optional[List[IssueDraftIn]] = None
+
+
+@router.post("/plan-epic/rollout/{thread_id}/decision", response_model=RolloutStatusResponse)
+async def submit_rollout_decision_endpoint(
+    thread_id: str, req: RolloutDecisionRequest, request: Request
+) -> RolloutStatusResponse:
+    """Resumes a paused rollout with a human decision. `edit` requires `epic`+`issues` (the caller's
+    modified version of the paused plan); `approve`/`reject` ignore them if present. Runs the commit
+    loop to completion (or failure) before returning — see rollout_graph.py's module docstring for why
+    that loop is safe to interrupt with a process crash, not just with this ordinary blocking wait.
+    """
+    graph = _rollout_graph(request)
+    config = {"configurable": {"thread_id": thread_id}}
+    snap = await graph.aget_state(config)
+    if not snap.values:
+        raise HTTPException(status_code=404, detail=f"no rollout workflow with thread_id={thread_id}")
+    await _authorize_workflow_state(request, snap.values)
+    if snap.values.get("status") != "pending_approval":
+        raise HTTPException(
+            status_code=409,
+            detail=f"rollout {thread_id} is not awaiting approval (status={snap.values.get('status')})",
+        )
+
+    resume_payload: dict = {"decision": req.decision}
+    if req.decision == "edit":
+        if req.epic is None or not req.issues:
+            raise HTTPException(status_code=422, detail="decision=edit requires epic and issues")
+        resume_payload["epic"] = req.epic.model_dump()
+        resume_payload["issues"] = [i.model_dump() for i in req.issues]
+
+    await graph.ainvoke(Command(resume=resume_payload), config=config)
+    final = await graph.aget_state(config)
+    return _rollout_status_response(thread_id, final.values)
+
+
+@router.post("/plan-epic/rollout/{thread_id}/retry", response_model=RolloutStatusResponse)
+async def retry_rollout_endpoint(thread_id: str, request: Request) -> RolloutStatusResponse:
+    """Un-sticks a rollout at `status="committing"` (a suspected process crash — `GET
+    /plan-epic/rollout/{id}` alone, i.e. "Refresh status" in the UI, is a pure state *read* and will
+    never advance a crashed run on its own, verified live: a crashed thread sat at "committing"
+    unchanged across repeated status reads) or `status="failed"` (a clean failure — jira-backend was
+    unreachable, returned a 5xx, etc, while ai-service itself stayed up). See
+    rollout_graph.py's `retry_rollout` docstring for why these two need different internal handling.
+    409s for any other status, including `pending_approval` — this isn't another way to submit the
+    original decision, only to un-stick one that already got one.
+    """
+    graph = _rollout_graph(request)
+    config = {"configurable": {"thread_id": thread_id}}
+    snap = await graph.aget_state(config)
+    if not snap.values:
+        raise HTTPException(status_code=404, detail=f"no rollout workflow with thread_id={thread_id}")
+    await _authorize_workflow_state(request, snap.values)
+    if snap.values.get("status") not in ("committing", "failed"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"rollout {thread_id} is not committing or failed (status={snap.values.get('status')})",
+        )
+    await retry_rollout(graph, thread_id)
+    final = await graph.aget_state(config)
+    return _rollout_status_response(thread_id, final.values)
 
 
 class FlaggedIssueIn(_CamelModel):
@@ -634,3 +892,41 @@ async def _safe_cache_put(cache, question: str, space_ids: List[int], response: 
         # The answer was already computed and returned to the caller successfully — a failed cache
         # write must never turn a successful request into a failed one.
         logger.warning("cache.put() failed; response was still returned to the caller", exc_info=True)
+
+
+async def _authorize_space_ids(request: Request, space_ids: List[int]) -> None:
+    """Reject a request for a space the gateway-forwarded user isn't a member of.
+
+    Unlike the cache helpers above, this must NOT degrade gracefully on failure — this is a
+    permission boundary, not an optimization. If jira-backend (the membership source of truth) is
+    unreachable, failing OPEN (silently permitting) would defeat the entire point of the check; the
+    502 here fails CLOSED instead, the opposite tradeoff from the cache's "never break a request over
+    an optimization" principle, deliberately.
+    """
+    user_id = request.headers.get("x-user-id")
+    username = request.headers.get("x-username")
+    checker = request.app.state.space_membership
+    try:
+        await checker.validate(user_id, username, space_ids)
+    except SpaceMembershipError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - jira-backend unreachable etc.
+        logger.error("space membership check failed", exc_info=True)
+        raise HTTPException(status_code=502, detail="space membership check failed") from exc
+
+
+async def _authorize_workflow_state(request: Request, values: dict) -> None:
+    """Restrict a durable workflow to the authenticated user who created it.
+
+    A thread UUID is an identifier, not an authorization credential. Start endpoints persist the
+    gateway-derived caller identity in graph state; every later status/resume/history operation must
+    compare the *current* caller with that owner before exposing or mutating the checkpoint. Direct
+    internal callers without gateway headers remain supported for local eval scripts, matching
+    `_authorize_space_ids`' trusted-internal convention.
+    """
+    user_id, _ = _caller_identity(request)
+    if not user_id:
+        return
+    if str(values.get("user_id") or "") != user_id:
+        raise HTTPException(status_code=403, detail="workflow is not owned by the authenticated user")
+    await _authorize_space_ids(request, [values["space_id"]])

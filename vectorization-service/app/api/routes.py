@@ -176,7 +176,8 @@ async def search(req: SearchRequest, request: Request) -> SearchResponse:
         else:
             hits = hits[: req.limit]
     except Exception as exc:  # noqa: BLE001 - surface as a clean 502, don't leak internals
-        raise HTTPException(status_code=502, detail=f"search failed: {exc}") from exc
+        logger.exception("search failed")
+        raise HTTPException(status_code=502, detail="search request failed") from exc
 
     logger.info(
         "search completed",
@@ -272,7 +273,8 @@ async def query_issues(req: IssueQueryRequest, request: Request) -> IssueQueryRe
             limit=req.limit,
         )
     except Exception as exc:  # noqa: BLE001 - same clean-502 contract as /search
-        raise HTTPException(status_code=502, detail=f"issue query failed: {exc}") from exc
+        logger.exception("issue query failed")
+        raise HTTPException(status_code=502, detail="issue query failed") from exc
 
     logger.info(
         "issue query completed",
@@ -341,7 +343,8 @@ async def issue_history(req: IssueHistoryRequest, request: Request) -> IssueHist
             limit=req.limit,
         )
     except Exception as exc:  # noqa: BLE001 - same clean-502 contract as /search
-        raise HTTPException(status_code=502, detail=f"issue history query failed: {exc}") from exc
+        logger.exception("issue history query failed")
+        raise HTTPException(status_code=502, detail="issue history query failed") from exc
 
     logger.info(
         "issue history query completed",
@@ -394,7 +397,8 @@ async def issue_comments(req: IssueCommentsRequest, request: Request) -> IssueCo
     try:
         result = await store.get_issue_comments(req.space_ids, req.issue_keys, limit=req.limit)
     except Exception as exc:  # noqa: BLE001 - same clean-502 contract as /search
-        raise HTTPException(status_code=502, detail=f"issue comments query failed: {exc}") from exc
+        logger.exception("issue comments query failed")
+        raise HTTPException(status_code=502, detail="issue comments query failed") from exc
 
     logger.info(
         "issue comments fetch completed",
@@ -446,7 +450,8 @@ async def issue_details(req: IssueDetailsRequest, request: Request) -> IssueDeta
     try:
         result = await store.get_issue_details(req.space_ids, req.issue_keys, limit=req.limit)
     except Exception as exc:  # noqa: BLE001 - same clean-502 contract as /search
-        raise HTTPException(status_code=502, detail=f"issue details query failed: {exc}") from exc
+        logger.exception("issue details query failed")
+        raise HTTPException(status_code=502, detail="issue details query failed") from exc
 
     logger.info(
         "issue details fetch completed",
@@ -501,7 +506,8 @@ async def issue_attachments(req: IssueAttachmentsRequest, request: Request) -> I
     try:
         result = await store.get_issue_attachments(req.space_ids, req.issue_keys, limit=req.limit)
     except Exception as exc:  # noqa: BLE001 - same clean-502 contract as /search
-        raise HTTPException(status_code=502, detail=f"issue attachments query failed: {exc}") from exc
+        logger.exception("issue attachments query failed")
+        raise HTTPException(status_code=502, detail="issue attachments query failed") from exc
 
     logger.info(
         "issue attachments fetch completed",
@@ -576,7 +582,8 @@ async def query_sprints(req: SprintQueryRequest, request: Request) -> SprintQuer
             limit=req.limit,
         )
     except Exception as exc:  # noqa: BLE001 - same clean-502 contract as /search
-        raise HTTPException(status_code=502, detail=f"sprint query failed: {exc}") from exc
+        logger.exception("sprint query failed")
+        raise HTTPException(status_code=502, detail="sprint query failed") from exc
 
     logger.info(
         "sprint query completed",

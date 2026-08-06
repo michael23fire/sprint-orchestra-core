@@ -13,7 +13,7 @@
 | **FTS 留在 Core** | **全文檢索（Postgres `tsvector` / GIN / pg_trgm）不獨立成服務**：索引就長在 Core 自己的 `issues` / `comments` 表上，Postgres 在寫入時原生維護，查詢邏輯留在 `SearchService`。把它抽出去只會多一份重複資料，沒有實質收益。真正需要解耦的是 **embedding**（呼叫慢、會失敗、需重試的外部模型 API）。 |
 | **事件驅動灌資料** | Kafka 作為 **decoupling buffer**；**不經 Flink**（串流運算層暫緩）。兩個 ingestion topic：`jira.content.ingestion`（issue / comment 文字）與 `jira.attachment.ingestion`（附件二進位定位符）。 |
 | **Vectorization 獨立（已建置）** | **`vectorization-service`**（FastAPI）：消費上述兩個 topic，HTML→text／Docling 抽取附件、（可選）**contextual retrieval** 補上下文、token+overlap 切 chunk、呼叫 embedding（Voyage／OpenAI）、以 **決定性 key upsert** 進 **pgvector**。負責 **RAG data ingestion（寫索引）**，同時擁有索引的 **raw 查詢入口**（`POST /search`：vector ∪ lexical，RRF 融合排序，可選 **cross-encoder rerank** 二階段重排）與 **embedding 原語**（`POST /embed`，供 ai-service 語意快取重用）——寫、查詢、embedding 原語同屬索引擁有者，互動式 agent 組合邏輯不在此。 |
-| **AI 能力單一服務（已建置雛形）** | **`ai-service`**（FastAPI）：Hybrid retrieval、Agent orchestration 已實作為 **agentic RAG + Corrective RAG loop**（Claude tool use：檢索 → 自我評估 → 不夠好就換 query 重新檢索 → 回答並附引用，或誠實承認不知道），並附 **token/cost 追蹤**與**語意查詢快取**（exact + embedding-similarity，兩層皆對 `space_ids` 做嚴格隔離）。Sprint intelligence 仍是設計預留。 |
+| **AI 能力單一服務（已建置）** | **`ai-service`**（FastAPI）：agentic/Corrective RAG、七個檢索工具、引用與驗證、token/cost 追蹤、Redis Stack 語意快取、task drafting、epic planning、sprint health，及兩條 Postgres-checkpointed LangGraph durable workflows（epic rollout、sprint recovery）。 |
 | **可觀測性：兩服務已有 metrics，跨服務 tracing 仍預留** | `vectorization-service` 與 `ai-service` 皆已實作 `GET /metrics`（Prometheus text format：request latency + 各自 pipeline 的 stage-level histogram）與 request-id 關聯的結構化 log（`app/observability.py`）；**尚未**接上跨服務的 distributed tracing（OpenTelemetry spans 串 Core → Kafka → Vectorization → AI 的完整 request 路徑）——已實作的部分足以回答「單一服務內哪個 stage 慢」，跨服務因果鏈仍待 OTel。不在架構圖上單獨畫「Observability Service」；未來跨服務 trace 由 **共用 Collector / 後端**（Prometheus、Loki、Tempo/Jaeger 等）承接。 |
 
 ---
@@ -29,9 +29,9 @@
 | ⑤ Kafka | **保留**（topic 策略可依 space / event type 演進） |
 | ⑥ Flink | **移除（現階段）** |
 | ⑦ Knowledge index | **與 vectorization 管線合併** → **Vectorization Service**（`vectorization-service`，已建置）。FTS 索引不在此，留在 Core；vectorization 另有自己的 chunk-granularity lexical index 用於 hybrid fusion，兩者用途不同（見 §3 附註）。 |
-| ⑧ Vector retrieval | **併入 AI Service**（`ai-service`，已建置：呼叫 vectorization-service 的 `/search`，agent 自行判斷要不要換 query 重新檢索） |
+| ⑧ Vector retrieval | Raw hybrid retrieval/rerank 由索引擁有者 **Vectorization Service** 提供；AI Service 透過 `/search` 組合 tool loop 並決定是否改寫 query 再檢索 |
 | ⑨ Agent orchestration | **併入 AI Service**（已建置：Claude tool use 驅動的 corrective-retrieval loop，見 §5） |
-| ⑩ Sprint intelligence | **併入 AI Service**（設計預留，尚未實作） |
+| ⑩ Sprint intelligence | **併入 AI Service**（已實作 `POST /sprint-health` 與 durable sprint-recovery workflow） |
 | ⑪ AI observability | **併入 AI Service**（對內模組／dashboard；對外仍走共用 OTel） |
 | ⑫ Platform observability | **不獨立成業務服務** → **全服務統一埋點 + 共用Observability 後端** |
 
@@ -62,7 +62,7 @@ flowchart TB
   end
 
   subgraph ai [AI 服務]
-    AI[ai-service FastAPI<br/>Corrective-RAG agent loop · Claude tool use<br/>Semantic cache · Cost tracking · GET /metrics<br/>Sprint intelligence（預留）]
+    AI[ai-service FastAPI<br/>Corrective-RAG · 7 retrieval tools<br/>Drafting · Planning · Sprint health<br/>Durable rollout / recovery · GET /metrics]
   end
 
   subgraph data [資料與物件]
@@ -102,7 +102,7 @@ flowchart TB
 
 - **Core → Kafka**：issue / comment / 附件變更皆在交易提交後（`AFTER_COMMIT`）發佈。issue / comment 事件把文字直接放進 payload（小、免回讀 Core DB）；附件事件只放 `s3://` 定位符，由 vectorization-service 自行拉檔。刪除有專屬事件（`issue_deleted` / `comment_deleted` / `attachment_deleted`）——向量庫是另一份複製資料，Postgres cascade 刪不到它，沒有刪除事件會留下 stale index。
 - **Gateway → AI**：若 AI 能力走獨立路由或不同 scaling profile，可由 Gateway 分流；亦可由 Core 內部 HTTP 呼叫 AI（視邊界與延遲需求而定）。
-- **Vectorization**：專責 **data ingestion for RAG（寫索引）**；以決定性 key upsert（`issue:{id}` / `comment:{id}` / `attachment:{id}#{n}`）保證 Kafka 至少一次傳遞下的冪等。互動式 retrieval / rerank / agent 屬 AI Service（讀索引）。
+- **Vectorization**：擁有 RAG index 的寫入與 raw read primitives；以決定性 key upsert（`issue:{id}` / `comment:{id}` / `attachment:{id}#{n}`）保證 Kafka 至少一次傳遞下的冪等，並提供 hybrid retrieval / rerank。多步 agent orchestration 與回答合成才屬 AI Service。
 - **FTS vs Vector**：兩種索引各司其職——FTS（lexical，exact / 關鍵字）由 Core + Postgres 就地維護；vector（semantic）由本服務寫入 pgvector。未來 hybrid retrieval 的「組合」邏輯落在 AI Service，而非灌資料端。
 
 ---
@@ -143,8 +143,8 @@ sequenceDiagram
 | 模組 | 職責 | 現況 |
 |------|------|------|
 | **Retrieval** | Hybrid search、rerank、top-k、citation 準備 | Hybrid search 已實作（呼叫 vectorization-service `/search`）；**rerank 已實作**，但落在 vectorization-service 那側（索引擁有者一併提供 cross-encoder 二階段重排，`VEC_RERANK_ENABLED`）——ai-service 收到的已是（可選）重排過的結果，這裡不重複做 |
-| **Agents** | Planner、tool/MCP 呼叫、多步推理 | 已實作：**Corrective RAG loop**（`app/agent/crag_loop.py`）——Claude 用 tool use 呼叫 `search_knowledge_base`，自行判斷檢索結果夠不夠、不夠就換個 query 角度重新檢索（有次數上限），最後回答附引用或誠實承認查不到 |
-| **Domain intelligence** | Sprint／board 相關 heuristics 或微調流程 | 設計預留，尚未實作 |
+| **Agents** | Planner、tool 呼叫、多步推理；未來 MCP | 已實作：**Corrective RAG loop**（`app/agent/crag_loop.py`）與七個內部 tools；MCP server/client 尚未實作，授權 contract 先列為後續項目 |
+| **Domain intelligence** | Sprint／board 風險分析與修復流程 | 已實作：`POST /sprint-health`；LangGraph sprint recovery 支援 clarification、human approval、idempotent execute、retry、Kafka re-evaluation、history 與 time travel |
 | **AI Ops** | Token／latency／retrieval quality 指標；對平台 OTel 匯出 | **Token/cost 已實作**（每次 `/ask` 回傳 `estimated_cost_usd`，`GET /stats` 累計）；**Latency 已實作**（`GET /metrics`，Prometheus，見 §6）；跨服務 OTel 匯出仍預留。另有一套可重跑的 **agentic eval harness**（`ai-service/eval/`，LLM-as-judge 評分 groundedness / abstention / retrieval 正確性）取代手動驗證 |
 | **Cache** | 查詢結果快取，降低重複問題的延遲與成本 | 已實作：exact-match + 語意（embedding cosine similarity）兩層快取（`app/cache/semantic_cache.py`），對 `space_ids` 嚴格隔離，TTL-only 失效（見 ai-service README「Semantic query cache」） |
 
@@ -168,8 +168,8 @@ sequenceDiagram
 
 **尚未做（誠實列出，非疏漏）：**
 
-1. **真正的 distributed tracing**（OpenTelemetry spans）：目前的 `x-request-id` 轉發只給了「同一個 id」，沒有 span 的 parent-child 結構、沒有每個 span 自己的起訖時間可在 Jaeger/Tempo 視覺化——這是共用 id 與正式 tracing 的差異，值得說清楚而非混為一談。
-2. **Collector / 後端**：`Prometheus`（metrics）、`Loki`（logs）、`Tempo/Jaeger`（traces）仍是規劃中的統一出口，目前是「每服務自己有 `/metrics`，需要的人自己接 Prometheus」的階段，不是全平台已接好儀表板。
+1. **真正的 distributed tracing**（OpenTelemetry spans）：目前的 `x-request-id` 轉發只給了「同一個 id」，沒有完整 Core → Kafka → Vectorization → AI 的 parent-child span 因果鏈。AI 的 Phoenix tracing 只涵蓋文件中列明的 LLM client 路徑。
+2. **統一 logs/traces backend**：`observability/docker-compose.observability.yml` 已提供可選的 Prometheus + Grafana + Phoenix overlay 與自動載入 dashboard；Loki、Tempo/Jaeger 與完整跨服務 trace 仍未導入。因此不是「沒有 dashboard」，也不是「全平台 tracing 已完成」。
 
 ---
 
@@ -182,9 +182,9 @@ sequenceDiagram
 | Core Platform（含附件 + Kafka publish） | **`jira-backend`**（附件 + issue/comment content 事件皆已發佈）；FTS 亦在此（`SearchService`） |
 | Kafka | Compose + optional producer；**`tmp-kafka-consumer-poc`** 僅 POC |
 | Vectorization Service | **`vectorization-service`**（FastAPI，已建置）：Kafka → chunk → embed → pgvector；`POST /search`（vector ∪ lexical，RRF，選用 cross-encoder rerank）；`POST /embed`；`GET /metrics`；contextual retrieval（選用）；自帶 `vecdb`（compose，:5433） |
-| AI Service | **`ai-service`**（FastAPI，已建置雛形）：Corrective RAG agent loop（Claude tool use，呼叫 vectorization-service `/search`）；語意查詢快取；token/cost 追蹤；`GET /metrics`；Sprint intelligence 仍預留 |
+| AI Service | **`ai-service`**（FastAPI，已建置）：Corrective RAG、七個 space-scoped tools、Redis Stack 語意快取、streaming、drafting/planning、sprint health、durable epic rollout 與 sprint recovery、token/cost、`GET /metrics` |
 | 併發驗證 | **`loadtest/`**（Locust）：對兩服務跑真實併發測試，`vectorization-service` 50 併發、0 失敗；過程中在 `ai-service` 找到並修復 2 個真實 bug，詳見 `loadtest/README.md` |
-| 雲端部署 | **`docs/AWS_DEPLOYMENT.md`**：單一 EC2、不用 managed Kafka/RDS 的成本可控部署方案；本地 demo 建議用 ngrok，不必每次都上雲 |
+| 雲端部署 | **`docs/AWS_DEPLOYMENT.md`**：單一 EC2 的 portfolio deployment；只公開 HTTPS gateway，內部服務 ports 不得直接曝露。尚未完成的 backend resource-level RBAC 使它不應被宣稱為 production-ready |
 | 統一 OTel（跨服務 tracing） | **待導入**；兩服務已各自有 `/metrics` + request-id 轉發（見 §6），差跨服務 span |
 
 ---
@@ -193,7 +193,7 @@ sequenceDiagram
 
 - Topic 命名與 **schema 版本**（JSON / Avro）與 consumer group 慣例。
 - Vectorization 與 Core 的 **讀檔策略**（signed URL vs 內部 service account）。
-- AI Service 與 Gateway 的 **route 前綴**與 **rate limit 分級**。
+- MCP server/client 的工具 contract、授權傳遞與 threat model（目前規劃中，尚未實作）。
 
 ---
 

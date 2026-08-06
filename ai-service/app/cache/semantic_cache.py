@@ -42,13 +42,12 @@ serving a WRONG answer, which is worse than a cache miss:
 Invalidation is still **TTL-only** (Redis `EX`, default 600s), not event-driven — same known
 simplification as before, see README "Semantic query cache".
 
-**Testing caveat, stated plainly**: `fakeredis` (used for hermetic tests elsewhere in this codebase)
+**Testing boundary, stated plainly**: `fakeredis` (used for hermetic tests elsewhere in this codebase)
 does not implement RediSearch's `FT.*` commands — confirmed directly (`FT.CREATE` raises "unknown
 command"). The exact-match tier and FIFO eviction bookkeeping (`tests/test_semantic_cache.py`) are
 still hermetically tested with `fakeredis`, since those paths never call `FT.*`. The semantic-tier KNN
-search itself has no hermetic test — it's verified against a real `redis-stack-server` container
-instead (the distance-semantics and cross-space-isolation claims above are from that verification),
-documented here rather than silently claimed as covered.
+search cannot be hermetic, so CI starts a real `redis-stack-server` and runs the optional integration
+test via `TEST_REDIS_STACK_URL`; that test covers both semantic hits and cross-space isolation.
 """
 from __future__ import annotations
 

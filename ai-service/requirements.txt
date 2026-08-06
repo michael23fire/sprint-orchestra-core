@@ -25,11 +25,12 @@ Jinja2==3.1.6
 # AI_EPIC_PLANNING_MULTIAGENT_ENABLED. Orchestration only — the nodes still call the same `instructor`
 # client above, so no second LLM abstraction is introduced.
 #
-# Pinned to 0.4.x deliberately, not latest: langgraph >=1.0 requires langchain-core >=1.0, which is
+# Pinned to the final 0.x line deliberately, not latest: langgraph >=1.0 requires langchain-core >=1.0, which is
 # mutually exclusive with the ragas 0.2.15 + langchain 0.3.x eval stack below (verified by actually
-# installing it — pip resolved langchain-core to 1.5.3 and broke all three langchain packages). 0.4.10
-# resolves cleanly against the pinned langchain-core 0.3.79 (`pip check` clean, both stacks import).
-langgraph==0.4.10
+# installing it — pip resolved langchain-core to 1.5.3 and broke all three langchain packages).
+# 0.6.11 stays on langchain-core 0.3.x while satisfying checkpoint-postgres 2.0.25's runtime
+# compatibility check (0.4.10 emitted an explicit incompatible-version warning on every import).
+langgraph==0.6.11
 
 # --- Epic rollout: durable, human-approved commit-to-Jira workflow (app/planning/rollout_graph.py) ---
 # Real Postgres-backed checkpointing (AsyncPostgresSaver), not InMemorySaver — a pending approval must

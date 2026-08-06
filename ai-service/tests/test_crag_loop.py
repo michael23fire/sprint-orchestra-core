@@ -3,6 +3,9 @@
 These test the loop's *decisions* (does it re-retrieve, does it stop, does it respect the security
 boundary on space_ids) independent of any real model's answer quality — that's what eval/ measures.
 """
+import asyncio
+
+import app.agent.crag_loop as crag_loop
 from app.agent.crag_loop import (
     ABSTENTION_PHRASE,
     CragAgent,
@@ -454,6 +457,40 @@ async def test_system_prompt_carries_current_time_for_relative_time_questions():
         "search_knowledge_base", "query_issues", "query_sprints", "get_issue_history",
         "get_issue_comments", "get_issue_details", "get_issue_attachments",
     ]
+
+
+async def test_concurrent_asks_keep_their_own_system_prompt(monkeypatch):
+    """A shared agent must not swap request A's clock for request B's between LLM turns."""
+    timestamps = iter(["2030-01-01T00:00:00Z", "2040-02-02T00:00:00Z"])
+    monkeypatch.setattr(crag_loop, "_current_time_for_prompt", lambda: next(timestamps))
+    second_request_started = asyncio.Event()
+
+    class InterleavingLLM:
+        def __init__(self):
+            self.calls_by_question = {}
+            self.systems_by_question = {}
+
+        async def next_turn(self, system, messages, tools, tool_choice=None):
+            question = messages[0]["content"]
+            call_number = self.calls_by_question.get(question, 0) + 1
+            self.calls_by_question[question] = call_number
+            self.systems_by_question.setdefault(question, []).append(system)
+            if question == "request A" and call_number == 1:
+                await second_request_started.wait()
+            elif question == "request B" and call_number == 1:
+                second_request_started.set()
+            return _tool_use_turn(question, f"{question}-{call_number}") if call_number == 1 else _end_turn("done")
+
+    llm = InterleavingLLM()
+    agent = CragAgent(llm, FakeRetrieval(), max_iterations=4, top_k=5)
+
+    first = asyncio.create_task(agent.ask("request A", space_ids=[7]))
+    await asyncio.sleep(0)
+    second = asyncio.create_task(agent.ask("request B", space_ids=[7]))
+    await asyncio.gather(first, second)
+
+    assert all("2030-01-01T00:00:00Z" in prompt for prompt in llm.systems_by_question["request A"])
+    assert all("2040-02-02T00:00:00Z" in prompt for prompt in llm.systems_by_question["request B"])
 
 
 async def test_query_issues_strips_non_whitelisted_fields_from_model_input():

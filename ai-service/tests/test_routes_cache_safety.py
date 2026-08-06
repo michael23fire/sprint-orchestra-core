@@ -3,7 +3,7 @@ a semantic-cache backend failure (e.g. vectorization-service's /embed erroring o
 load) must degrade POST /ask to "treat as a cache miss / skip the cache write," never crash the
 whole request with an unhandled 500 — caching is an optimization, not a correctness dependency.
 """
-from app.api.routes import _safe_cache_get, _safe_cache_put
+from app.api.routes import CitationOut, _safe_cache_get, _safe_cache_put
 
 
 class _BrokenCache:
@@ -34,3 +34,11 @@ async def test_safe_cache_put_swallows_backend_failure():
 async def test_safe_cache_get_passes_through_a_real_hit():
     result = await _safe_cache_get(_WorkingCache(), "question", [1])
     assert result == {"answer": "cached"}
+
+
+def test_citation_serializes_the_optional_pdf_page_in_camel_case():
+    citation = CitationOut(
+        issue_key="ATC-46", chunk_type="attachment", source_id=5000940,
+        content="Invoice total: $42", page_number=2,
+    )
+    assert citation.model_dump(by_alias=True)["pageNumber"] == 2

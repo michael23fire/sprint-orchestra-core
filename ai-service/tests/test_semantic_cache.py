@@ -1,18 +1,21 @@
-"""Semantic cache tests — fakeredis (in-memory, real Redis wire protocol) + a fake embedding client.
+"""Semantic cache tests — fakeredis plus an optional real Redis Stack integration test.
 
 fakeredis does not implement RediSearch's `FT.*` commands (confirmed directly — `FT.CREATE` raises
 "unknown command"), so the semantic-tier KNN search itself (`RedisSemanticCache.get()`'s vector
-search path) has **no hermetic coverage here** — it's verified against a real `redis-stack-server`
-container instead (see `app/cache/semantic_cache.py`'s module docstring for what was verified: COSIN
+search path) cannot have hermetic coverage here. CI sets ``TEST_REDIS_STACK_URL`` and executes the
+real integration test below against `redis-stack-server` (including COSINE
 distance-vs-similarity semantics, and that a `space_key` TAG filter genuinely returns zero cross-space
-hits). What *is* hermetically tested here: the exact-match tier (pure `GET`/`SET`, no `FT.*` calls)
+hits). What is hermetically tested with fakeredis: the exact-match tier (pure `GET`/`SET`, no `FT.*` calls)
 and the FIFO eviction bookkeeping (`RPUSH`/`LPOP`/`DEL`, also no `FT.*` calls) — both real code paths
 `put()` and `get()` exercise on every call regardless of whether the semantic tier ever fires.
 """
 import asyncio
+import os
+import uuid
 
 import fakeredis
 import pytest
+import redis.asyncio as redis
 
 from app.cache.semantic_cache import NoopCache, RedisSemanticCache, build_cache
 
@@ -65,15 +68,57 @@ async def test_exact_match_respects_space_ids_isolation(redis_client):
     cache = _cache(redis_client, {"is checkout broken": [1.0, 0.0]})
     await cache.put("is checkout broken", [1], {"answer": "yes, ATLAS-3"})
 
-    # Different scope, identical text — must be a miss even on the exact tier. (This will fall
-    # through to the semantic tier's FT.SEARCH, which fakeredis doesn't support — see module
-    # docstring — so this assertion only proves the exact tier itself never cross-matches; the
-    # semantic tier's isolation is verified live instead.)
+    # Inspect the exact tier directly instead of falling through to FT.SEARCH, which fakeredis does
+    # not implement. The real-Redis integration test below owns semantic-tier isolation coverage.
+    normalized = "is checkout broken"
+    assert await redis_client.get(cache._exact_key("1", normalized)) is not None
+    assert await redis_client.get(cache._exact_key("2", normalized)) is None
+
+
+async def test_real_redis_stack_semantic_hit_and_cross_space_isolation():
+    """Exercises the native FT.SEARCH path CI's Redis Stack service is specifically for."""
+    redis_url = os.getenv("TEST_REDIS_STACK_URL")
+    if not redis_url:
+        pytest.skip("TEST_REDIS_STACK_URL is not configured")
+
+    client = redis.from_url(redis_url)
+    question = f"checkout failure {uuid.uuid4().hex}"
+    paraphrase = f"why checkout failed {uuid.uuid4().hex}"
+    vector = [1.0, *([0.0] * 1023)]
+    cache = _cache(
+        client,
+        {question: vector, paraphrase: vector},
+        ttl=60,
+        threshold=0.97,
+        max_entries=10,
+        embedding_dim=1024,
+    )
+    space_ids = [987654321]
+    other_space_ids = [987654322]
+    await cache.ensure_index()
     try:
-        result = await cache.get("is checkout broken", [2])
-    except Exception as exc:  # noqa: BLE001 - fakeredis has no FT.SEARCH, expected here
-        pytest.skip(f"fakeredis has no RediSearch support ({exc}); verified live instead — see module docstring")
-    assert result is None
+        await cache.put(question, space_ids, {"answer": "connection pool exhaustion"})
+        # RediSearch indexing can be asynchronous; poll briefly instead of making the test timing-
+        # sensitive on a newly started CI container.
+        hit = None
+        for _ in range(20):
+            hit = await cache.get(paraphrase, space_ids)
+            if hit is not None:
+                break
+            await asyncio.sleep(0.05)
+        assert hit == {"answer": "connection pool exhaustion"}
+        assert await cache.get(paraphrase, other_space_ids) is None
+    finally:
+        space_key = "987654321"
+        entry_ids = await client.lrange(cache._index_key(space_key), 0, -1)
+        keys = [
+            cache._exact_key(space_key, " ".join(question.lower().split())),
+            cache._index_key(space_key),
+            *(cache._vector_key(space_key, raw.decode() if isinstance(raw, bytes) else raw) for raw in entry_ids),
+        ]
+        if keys:
+            await client.delete(*keys)
+        await client.aclose()
 
 
 async def test_disabled_cache_never_stores_or_returns_anything():

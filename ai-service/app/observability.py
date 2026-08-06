@@ -36,11 +36,27 @@ RETRIEVAL_ROUNDS = Histogram(
     "agent_retrieval_rounds", "Corrective-retrieval rounds per /ask call", buckets=(0, 1, 2, 3, 4, 5)
 )
 CACHE_HITS_TOTAL = Counter("agent_cache_hits_total", "POST /ask responses served from cache", ["hit_type"])
+# Same kind of metric as RETRIEVAL_ROUNDS above, for the other bounded loop in this service: how many
+# times the multi-agent planner (app/planning/graph.py) actually looped back on a critique. Without
+# it there's no way to tell whether the critic is finding real problems or rubber-stamping every
+# plan, short of grepping logs. Buckets match MAX_REVISION_ROUNDS' realistic range.
+PLANNING_REVISION_ROUNDS = Histogram(
+    "planning_revision_rounds", "Critique-driven revision rounds per multi-agent /plan-epic call",
+    buckets=(0, 1, 2, 3),
+)
 # A Counter (monotonically increasing), not a Gauge — cumulative $ spent only ever grows within a
 # process's lifetime, same semantics as GET /stats' total_cost_usd (app/stats.py); this is that same
 # number, just also exposed as a scrapeable metric so Grafana can graph it over time instead of only
 # reading the current snapshot via /stats.
 COST_USD_TOTAL = Counter("agent_cost_usd_total", "Cumulative estimated $ spent on LLM calls")
+# The "actually notify someone" half of app/sprint_recovery/graph.py's escalation cap — a workflow that
+# exhausts max_escalation_rounds without recovering is exactly the event an on-call/sprint-owner should
+# see graphed over time (is this happening more often lately?), not just a one-off log line.
+SPRINT_RECOVERY_ESCALATIONS_TOTAL = Counter(
+    "sprint_recovery_escalations_total",
+    "Sprint-recovery workflows that exhausted their escalation cap and handed off to a human",
+    ["space_id"],
+)
 
 
 def get_request_id() -> str:

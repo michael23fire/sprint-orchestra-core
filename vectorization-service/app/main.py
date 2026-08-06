@@ -73,8 +73,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Vectorization Service", version="0.1.0", lifespan=lifespan)
 app.add_middleware(ObservabilityMiddleware)
-# Demo-only convenience, not the real access-control boundary — see ai-service/app/main.py's
-# identical comment for the full reasoning (no auth exists in front of /search yet either).
+# Demo-only convenience, not an access-control boundary. This service has no end-user authentication
+# because it is an internal dependency of ai-service; keep :8100 private and restrict CORS/origin at
+# the authenticated public gateway instead of exposing this port directly.
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )

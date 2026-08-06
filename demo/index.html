@@ -170,6 +170,41 @@
   <div id="draftOut"></div>
 </fieldset>
 
+<fieldset>
+  <legend>4. Epic rollout — durable, human-approved commit to Jira (<code>POST /plan-epic/rollout</code>)</legend>
+  <p class="stats-line" style="margin-top:0">
+    Different from task drafting above: this pauses for a real approval step (a LangGraph
+    <code>interrupt()</code>, checkpointed in Postgres — it survives an ai-service restart while
+    paused) and, once approved, actually creates the issues in jira-backend, exactly once each even if
+    the process crashes mid-commit. Needs a real user id/username (unlike the other panels) because
+    jira-backend attributes each created issue to a real reporter.
+  </p>
+  <div class="row">
+    <div style="max-width:140px"><label>User id</label><input id="rolloutUserId" value="5000154" /></div>
+    <div style="max-width:200px"><label>Username</label><input id="rolloutUsername" value="atlascart.maya" /></div>
+    <div style="max-width:140px"><label>space_id</label><input id="rolloutSpaceId" value="5000014" /></div>
+  </div>
+  <label>Proposal</label>
+  <textarea id="rolloutProposal" placeholder="e.g. Add a dark mode toggle to account settings, persisted per-user."></textarea>
+  <button onclick="startRollout(this)">Start rollout (generate plan, pause for approval)</button>
+
+  <div class="presets">
+    <span class="cat">Try one of these</span>
+    <button onclick="setRolloutProposal('Add a dark mode toggle to account settings, persisted per-user.')">dark mode toggle</button>
+    <button onclick="setRolloutProposal('Let sellers bulk-export their order history as a CSV.')">CSV order export</button>
+  </div>
+
+  <div id="rolloutOut"></div>
+
+  <p class="stats-line" style="margin-top:16px">
+    <b>To see the crash/resume guarantee for real</b> (not simulated in this page): start a rollout,
+    click Approve, and — in a terminal, while it's mid-commit — kill and immediately restart the
+    ai-service process. Click "Refresh status" here once it's back up: already-created issues are not
+    duplicated, and the remaining ones finish committing on the next status check or decision call,
+    because the workflow's progress lived in Postgres the whole time, not in ai-service's memory.
+  </p>
+</fieldset>
+
 <script>
 const $ = id => document.getElementById(id);
 let lastQuestion = "";
@@ -419,6 +454,134 @@ async function draftTask(btn) {
         : `<div class="result"><span class="badge warn">request failed</span> ${escapeHtml(String(e))} — is ai-service running and reachable at ${escapeHtml(aiBase())}?</div>`;
     }
   });
+}
+
+function setRolloutProposal(q) { $('rolloutProposal').value = q; }
+let rolloutThreadId = null;
+
+function rolloutHeaders() {
+  return {
+    'Content-Type': 'application/json',
+    'X-User-Id': $('rolloutUserId').value.trim(),
+    'X-Username': $('rolloutUsername').value.trim(),
+  };
+}
+
+function renderRolloutPlan(d) {
+  const p = d.plan;
+  const statusBadge = {
+    pending_approval: '<span class="badge info">pending approval</span>',
+    committing: '<span class="badge info">committing…</span>',
+    committed: '<span class="badge ok">committed</span>',
+    rejected: '<span class="badge muted">rejected</span>',
+    failed: '<span class="badge warn">failed</span>',
+  }[d.status] || `<span class="badge muted">${escapeHtml(d.status)}</span>`;
+
+  const issuesHtml = p.issues.map(i => {
+    const key = d.committedIssueKeys[i.tempId];
+    const keyBadge = key ? `<span class="badge ok">${key}</span>` : '';
+    return `<div class="hit">
+        <div class="meta">temp_id ${i.tempId} · ${escapeHtml(i.issueType)} · ${i.estimateStoryPoints ?? '?'} pts ${keyBadge}</div>
+        <input data-edit-title="${i.tempId}" value="${escapeHtml(i.title)}" ${d.status !== 'pending_approval' ? 'disabled' : ''} />
+      </div>`;
+  }).join('');
+
+  const actions = d.status === 'pending_approval'
+    ? `<button onclick="decideRollout('${d.threadId}', 'approve')">Approve</button>
+       <button onclick="decideRollout('${d.threadId}', 'edit')" class="secondary">Save title edits &amp; approve</button>
+       <button onclick="decideRollout('${d.threadId}', 'reject')" class="secondary">Reject</button>`
+    : `<button class="secondary" onclick="refreshRollout('${d.threadId}')">Refresh status</button>`;
+
+  const err = d.error ? `<p class="stats-line" style="color:#d94f4f">${escapeHtml(d.error)}</p>` : '';
+
+  return `<div class="result fade-in">
+      ${statusBadge} <span class="badge muted">thread ${d.threadId.slice(0, 8)}</span>
+      <p style="margin-top:10px; font-size:1.05rem"><b>${escapeHtml(p.epic ? p.epic.title : '')}</b></p>
+      <p class="stats-line">${escapeHtml(p.epic ? p.epic.description : '')}</p>
+      ${err}
+      <p class="stats-line" style="margin-top:10px"><b>Issues</b> (edit a title, then "Save title edits &amp; approve" to commit your version instead of the generated one)</p>
+      ${issuesHtml}
+      <div style="margin-top:10px">${actions}</div>
+    </div>`;
+}
+
+async function startRollout(btn) {
+  const proposal = $('rolloutProposal').value.trim();
+  if (!proposal) return;
+  const out = $('rolloutOut');
+  await withLoading(btn, out, {
+    busyText: 'Planning…',
+    message: 'Generating the plan — this is the same call /plan-epic makes, just paused for approval afterward.',
+  }, async (signal) => {
+    try {
+      const resp = await fetch(aiBase() + '/plan-epic/rollout', {
+        method: 'POST', headers: rolloutHeaders(),
+        body: JSON.stringify({
+          proposal, spaceId: parseInt($('rolloutSpaceId').value, 10),
+        }),
+        signal,
+      });
+      if (!resp.ok) {
+        const body = await resp.text();
+        out.innerHTML = `<div class="result"><span class="badge warn">HTTP ${resp.status}</span> ${formatErrorBody(body)}</div>`;
+        return;
+      }
+      const d = await resp.json();
+      rolloutThreadId = d.threadId;
+      out.innerHTML = renderRolloutPlan(d);
+    } catch (e) {
+      out.innerHTML = e.name === 'AbortError'
+        ? `<div class="result"><span class="badge warn">timed out</span> No response after 90s. <button class="secondary" onclick="startRollout(this)">Retry</button></div>`
+        : `<div class="result"><span class="badge warn">request failed</span> ${escapeHtml(String(e))}</div>`;
+    }
+  });
+}
+
+async function decideRollout(threadId, decision) {
+  const out = $('rolloutOut');
+  const body = { decision };
+  if (decision === 'edit') {
+    const titleInputs = out.querySelectorAll('[data-edit-title]');
+    // Re-fetch the current plan first so we edit titles onto the real current issue list rather than
+    // trusting stale DOM state for everything else (description/labels/estimate/depends_on).
+    const statusResp = await fetch(aiBase() + `/plan-epic/rollout/${threadId}`, { headers: rolloutHeaders() });
+    const current = await statusResp.json();
+    const titleByTempId = {};
+    titleInputs.forEach(inp => { titleByTempId[inp.dataset.editTitle] = inp.value; });
+    body.epic = current.plan.epic;
+    body.issues = current.plan.issues.map(i => ({ ...i, title: titleByTempId[i.tempId] ?? i.title }));
+  }
+  out.innerHTML = `<div class="result loading-card"><span class="spinner"></span> ${decision === 'reject' ? 'Rejecting' : 'Committing to Jira'}…</div>`;
+  try {
+    const resp = await fetch(aiBase() + `/plan-epic/rollout/${threadId}/decision`, {
+      method: 'POST', headers: rolloutHeaders(), body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const b = await resp.text();
+      out.innerHTML = `<div class="result"><span class="badge warn">HTTP ${resp.status}</span> ${formatErrorBody(b)}</div>`;
+      return;
+    }
+    const d = await resp.json();
+    out.innerHTML = renderRolloutPlan(d);
+  } catch (e) {
+    out.innerHTML = `<div class="result"><span class="badge warn">request failed</span> ${escapeHtml(String(e))}</div>`;
+  }
+}
+
+async function refreshRollout(threadId) {
+  const out = $('rolloutOut');
+  try {
+    const resp = await fetch(aiBase() + `/plan-epic/rollout/${threadId}`, { headers: rolloutHeaders() });
+    if (!resp.ok) {
+      const b = await resp.text();
+      out.innerHTML = `<div class="result"><span class="badge warn">HTTP ${resp.status}</span> ${formatErrorBody(b)}</div>`;
+      return;
+    }
+    const d = await resp.json();
+    out.innerHTML = renderRolloutPlan(d);
+  } catch (e) {
+    out.innerHTML = `<div class="result"><span class="badge warn">request failed</span> ${escapeHtml(String(e))} — if you just restarted ai-service, give it a couple seconds and try again.</div>`;
+  }
 }
 
 checkHealth();

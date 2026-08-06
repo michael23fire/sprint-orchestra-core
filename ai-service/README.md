@@ -32,9 +32,9 @@ judgment," not a bespoke classifier — and it was **proven working against a re
 designed on paper (see Results below: query reformulation firing mid-conversation, e.g. `"vague
 query"` → `"HikariCP connection pool"`).
 
-## Three tools: content vs. current state vs. transitions (and why routing matters)
+## Seven tools: semantic content, exact state, and transitions
 
-The agent has **three** tools, and picking the right one is the point:
+The agent has **seven** tools, and picking the right one is the point:
 
 - `search_knowledge_base` — semantic/keyword search over issue and comment **text**. For content
   questions: "why did X break", "how did we fix Y", "find issues about topic T".
@@ -49,6 +49,11 @@ The agent has **three** tools, and picking the right one is the point:
   to blocked". Because relative time ("just now", "past 3 months") is meaningless to a model without
   a clock, the system prompt is built per-request with the current UTC timestamp so the model can
   resolve those into concrete `since` filters.
+- `query_sprints` — exact sprint state, ordering, dates, and issue counts; used before issue queries
+  when a question refers to an active or named sprint.
+- `get_issue_comments`, `get_issue_details`, and `get_issue_attachments` — deterministic fallback
+  reads for known issue keys when top-k semantic search is the wrong way to fetch complete source
+  material. These paths return citation-bearing evidence, not model memory.
 
 This exists because semantic retrieval **cannot answer a "how many" or "list all" question** — it
 returns its top few best guesses, never a complete, counted set. Live, with only semantic search, the
@@ -59,7 +64,7 @@ question that mixes both ("how many bugs are about checkout") uses `query_issues
 `search_knowledge_base` for the topic. `query_issues` returning a count of **0** is a real answer
 ("there are none"), explicitly not a reason to abstain.
 
-The same `space_ids` security boundary below applies to *all three* tools: the loop injects the
+The same `space_ids` security boundary below applies to *all seven* tools: the loop injects the
 caller's authorized spaces into every structured call and strips any non-whitelisted field (including
 a model-supplied `space_ids`) from the tool input — a prompt-injected model cannot widen its own scope
 through the structured paths any more than through search.
@@ -103,8 +108,11 @@ cp .env.example .env
 uvicorn app.main:app --port 8200
 ```
 
-Requires `vectorization-service` running (`AI_VECTORIZATION_SERVICE_URL`, default `:8100`) with an
-ingested corpus.
+Requires `vectorization-service` (`:8100`) with an ingested corpus. The default configuration also
+enables Redis semantic caching, both Postgres-checkpointed workflows, and the sprint-recovery Kafka
+trigger, so Redis (`:6379`), core Postgres (`:5432`), and Kafka (`:9092`) must be running. For a
+minimal standalone process, set `AI_CACHE_ENABLED=false`, `AI_EPIC_ROLLOUT_ENABLED=false`, and
+`AI_SPRINT_RECOVERY_ENABLED=false`.
 
 ### Optional: routing through the LiteLLM gateway instead of directly to a provider
 
@@ -134,7 +142,13 @@ for the exact commands and real output.
 | GET | `/stats` | Cumulative token usage + estimated $ cost since process start — see Cost tracking below |
 | GET | `/metrics` | Prometheus text-format metrics (request latency, LLM/retrieval/cache stage timings, corrective-retrieval-rounds distribution) — see Observability below |
 | POST | `/ask` | `{question, space_ids}` → `{answer, abstained, retrieval_rounds, queries_used, citations, input_tokens, output_tokens, estimated_cost_usd, cache_hit}` |
+| POST | `/ask/stream` | SSE progress plus the same final Ask result |
+| POST | `/search` | Space-authorized semantic issue dedup/search helper |
 | POST | `/draft-task` | `{description, existing_labels?}` → `{draft: {title, issue_type, labels, estimate_story_points, dependencies}, degraded, latency_seconds}` — see "AI-assisted task creation" below |
+| POST | `/plan-epic`, `/plan-epic/refine` | Generate or refine a structured epic plan; optional planner↔critic LangGraph path |
+| POST/GET | `/plan-epic/rollout/**` | Start/stream/read/approve/reject/retry a durable human-approved rollout |
+| POST | `/sprint-health` | Deterministic sprint risk signals plus grounded AI analysis |
+| POST/GET | `/sprint-recovery/**` | Durable recovery start, clarification, decision, retry, reevaluation, history, and time travel |
 
 ## Cost tracking
 
@@ -187,10 +201,8 @@ for the original uncached request — the actual latency/cost this cache buys, n
 Known simplification: invalidation is **TTL-only** (`AI_CACHE_TTL_SECONDS`, default 600s), not
 event-driven — the system already has a natural invalidation signal (the same Kafka content-change
 events `vectorization-service` consumes) that a production version would use to purge affected entries
-on write; not wired here to avoid coupling this service to Kafka consumer infrastructure it otherwise
-doesn't need. Also **in-process and single-instance by design** — a multi-instance deployment would
-need a shared backend (Redis, already in this repo's `docker-compose.yml` for exactly this kind of
-future use) instead of an in-memory dict.
+on write. Cache state is already shared in Redis Stack and uses native RediSearch KNN; it is not an
+in-process dictionary.
 
 ## AI-assisted task creation (`POST /draft-task`)
 
@@ -414,21 +426,68 @@ direct reproduction proving the failure is upstream: [`../loadtest/README.md`](.
 
 ## Deployment
 
-For running this outside your laptop — a quick `ngrok` tunnel for a live demo, or a real (and
-deliberately cost-controlled) single-EC2 AWS deployment for the cloud-deployment experience itself —
-see [`../docs/AWS_DEPLOYMENT.md`](../docs/AWS_DEPLOYMENT.md).
+For running this outside your laptop, expose only the authenticated gateway (preferably behind HTTPS),
+never this service's direct port. See [`../docs/AWS_DEPLOYMENT.md`](../docs/AWS_DEPLOYMENT.md).
 
 ## Known simplifications (portfolio scope)
 
-- **CRAG grading is the agent's own reasoning**, not a separately trained relevance classifier (see
-  above) — a deliberate, documented simplification matching common production practice, not an
-  oversight.
-- **No reranking model** (e.g. a cross-encoder) after retrieval — hybrid RRF fusion is the only
-  ranking signal combination in this system today.
-- **No prompt caching / streaming** — `/ask` is a single blocking call; a chat-style UI would want
-  streaming, and repeated system-prompt tokens across requests are a natural prompt-caching candidate.
-  (Not to be confused with the *semantic query cache* above, which caches whole answers, not prompt
-  tokens — the two are complementary, not overlapping.)
-- **Judge and agent share one model** in the eval script above — for a fully independent check, the
-  judge should be a different (ideally stronger) model than the one being graded; the harness supports
-  this by construction (pass a different `LLMClient` to `grade(...)`), just not wired as a CLI flag yet.
+Kept up to date as the system evolves — several items below were open gaps earlier in this project
+and are now closed; see docs/RAG_ACCURACY_CASE_STUDIES.md for the full story behind each fix, not
+just the current-state summary here.
+
+**Still open:**
+- **CORS is wide open (`allow_origins=["*"]`)** — a demo-only choice, made explicit rather than
+  silently permissive (see `app/main.py`'s own comment). Space-level authorization is enforced now
+  (see below), but a real deployment still needs a real, non-`*` CORS origin allowlist.
+**Closed (kept here so the history of what was fixed doesn't get lost in git blame):**
+- ~~No runtime faithfulness guardrail~~ — **Fixed.** RAGAS's faithfulness metric is an *offline*
+  measurement; `crag_loop.py`'s `_check_faithfulness` (behind `AI_FAITHFULNESS_CHECK_ENABLED`, off by
+  default on cost grounds) now checks a live answer's claims against its retrieved context before it
+  reaches the caller, using the same verify-then-correct-once mechanism the existing post-generation
+  verifiers use.
+- ~~No naive-RAG baseline in the eval harness~~ — **Fixed.** `eval/naive_rag_baseline.py` scores plain
+  top-k vector search + a single-shot answer on the identical question set, metrics and judge. The gap
+  is large and specific (context_precision 0.913 vs. 0.175) — see Case Study 26.
+- ~~Only single-call structured output; no multi-agent orchestration~~ — **Added, and measured before
+  being trusted.** `app/planning/graph.py` runs `POST /plan-epic` through a LangGraph
+  planner ↔ critic pipeline with a bounded, critique-driven revision loop, behind
+  `AI_EPIC_PLANNING_MULTIAGENT_ENABLED` (off by default: multiple LLM calls instead of 1). The
+  estimator node was removed after evaluation measured no benefit.
+  `eval/planning_multiagent_eval.py` scores both arms against the same model on the same proposals,
+  with the ship/no-ship decision rule written into the script *before* the first run. That module's own
+  docstring states plainly that `crag_loop.py` already implements a bounded conditional loop with no
+  graph library at all — the case for LangGraph here is declarative routing and free per-node events,
+  not "the control flow requires it."
+- ~~`space_ids` trusted unconditionally from the caller~~ — **Fixed.** The gateway already validates
+  the JWT and forwards the real user's identity (`X-User-Id`/`X-Username`, see
+  `PropagateUserHeadersGatewayFilter.java`); jira-backend already exposes a membership-scoped space
+  list (`GET /api/spaces?userId=X`, the same endpoint the frontend's own `SpaceContext` calls). `/ask`,
+  `/ask/stream`, `/search`, and workflow start/resume operations validate requested or persisted
+  spaces via
+  `app/auth/space_membership.py`, failing closed (502) if jira-backend is unreachable rather than
+  silently permitting. Only enforced when `X-User-Id` is present — a direct caller with no gateway
+  headers (this project's own eval/smoke-test scripts, all of which call `:8200` directly) is treated
+  as a trusted internal caller and skipped, matching jira-backend's own
+  `GatewayInternalAuthFilter.requiresUserIdentity()` per-route convention.
+- ~~Durable workflow ids were bearer capabilities~~ — **Fixed.** Status, decision, retry,
+  clarification, history, and time-travel routes now require the authenticated workflow owner and
+  recheck that owner's membership in the persisted space. A user who guesses another thread UUID
+  cannot read or operate it.
+- ~~No reranking model after retrieval~~ — **Fixed.** A cross-encoder (`VEC_RERANK_ENABLED`, see
+  vectorization-service) now reranks the fused hybrid candidate pool.
+- ~~No streaming~~ — **Fixed.** `POST /ask/stream` (SSE) pushes agent-loop progress events as they
+  happen; same underlying `CragAgent.ask()` call as the blocking `/ask`.
+- ~~Judge and agent share one model~~ — **Fixed as a practice, not just a capability.** The harness
+  always supported a different judge (`ragas_eval.py --llm-model`); it's now actually exercised that
+  way in every ablation this project runs (e.g. `qwen2.5-72b-instruct` judging `gpt-5.6-luna`'s
+  answers) rather than being a theoretical option nobody used.
+- ~~CRAG grading is the agent's own reasoning, not a trained relevance classifier~~ — still true, but
+  reclassified from "gap" to "deliberate design" once the corrective-retrieval-fallback pattern
+  (`get_issue_comments`/`get_issue_details`/`get_issue_attachments`) made the actual failure mode this
+  gap implied (bad self-assessment of retrieval quality) a non-issue in practice — see
+  docs/RAG_ACCURACY_CASE_STUDIES.md's Case Study 25.
+- ~~No prompt caching~~ — **Fixed for Anthropic.** `AnthropicClient` places cache breakpoints on the
+  system/tools prefix and conversation tail, tracks cache-read/write tokens separately, and prices
+  them with separate multipliers. The request time embedded in the system prompt is bucketed to five
+  minutes so byte-identical prefixes can actually hit the cache; hermetic tests cover request shape
+  and pricing. A live dollar-savings measurement still requires an Anthropic credential.

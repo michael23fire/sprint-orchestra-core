@@ -61,6 +61,14 @@ ABSTENTION_PHRASE = "There is no information about this in the knowledge base."
 # latency split across stages," for the /ask response (see AskResponse.stage_timings).
 _stage_seconds: ContextVar[Dict[str, float] | None] = ContextVar("_stage_seconds", default=None)
 
+# The agent instance is shared by every request handled by one worker. Keep the request-specific
+# clock-bearing system prompt in task-local context for the same reason as stage timings above:
+# mutating an instance field in ask() lets a concurrent request replace the prompt between two LLM
+# turns of the first request.
+_request_system_prompt: ContextVar[str | None] = ContextVar(
+    "_request_system_prompt", default=None
+)
+
 
 def _add_stage_seconds(stage: str, elapsed: float) -> None:
     acc = _stage_seconds.get()
@@ -544,9 +552,9 @@ class CragAgent:
         # model for the actual API call; the agent needs the name separately just to price tokens.
         self._model = model
         self._faithfulness_check_enabled = faithfulness_check_enabled
-        # Rebuilt at the start of every ask() with the current UTC time; this default only exists so
-        # a direct _timed_llm_call in a test doesn't explode.
-        self._system = _system_prompt("1970-01-01T00:00:00Z")
+        # A direct _timed_llm_call outside ask() still gets a deterministic fallback. Normal calls
+        # use the task-local `_request_system_prompt`, so concurrent requests cannot overwrite it.
+        self._default_system = _system_prompt("1970-01-01T00:00:00Z")
         # Registry of deterministic post-generation verifiers (see Case Studies 15/17 in
         # docs/RAG_ACCURACY_CASE_STUDIES.md). Additional relationship verifiers can be registered
         # here without adding branches to the main ask loop. `_check_faithfulness` is intentionally
@@ -570,7 +578,7 @@ class CragAgent:
         stage = on_stage or (lambda _label: None)
         # Snapshot "now" once per ask so every LLM turn in this conversation sees the same clock —
         # needed to resolve relative time ("just now", "past 3 months") into concrete tool filters.
-        self._system = _system_prompt(_current_time_for_prompt())
+        request_system_prompt = _system_prompt(_current_time_for_prompt())
         # `history` is prior turns' FINAL text only ({"role": "user"|"assistant", "content": str}) —
         # deliberately not the intermediate tool_use/tool_result exchanges a completed turn produced
         # internally. Anthropic's API requires every tool_use to be followed by a matching tool_result
@@ -593,6 +601,7 @@ class CragAgent:
         initial_tool_choice = _initial_tool_choice(question)
         stage_seconds: Dict[str, float] = {}
         stage_seconds_token = _stage_seconds.set(stage_seconds)
+        system_prompt_token = _request_system_prompt.set(request_system_prompt)
 
         try:
             for iteration in range(self._max_iterations + 1):
@@ -792,6 +801,7 @@ class CragAgent:
             # histogram. This is the metric that answers "is corrective retrieval actually firing in
             # practice, and how often" without grepping logs.
             RETRIEVAL_ROUNDS.observe(retrieval_rounds)
+            _request_system_prompt.reset(system_prompt_token)
             _stage_seconds.reset(stage_seconds_token)
 
     async def _timed_llm_call(
@@ -800,7 +810,10 @@ class CragAgent:
         start = time.perf_counter()
         try:
             return await self._llm.next_turn(
-                self._system, messages, tools, tool_choice=tool_choice
+                _request_system_prompt.get() or self._default_system,
+                messages,
+                tools,
+                tool_choice=tool_choice,
             )
         finally:
             elapsed = time.perf_counter() - start

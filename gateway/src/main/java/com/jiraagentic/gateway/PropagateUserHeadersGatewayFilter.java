@@ -18,6 +18,9 @@ import reactor.core.publisher.Mono;
 @Component
 public class PropagateUserHeadersGatewayFilter implements GlobalFilter, Ordered {
 
+    static final String USER_ID_HEADER = "X-User-Id";
+    static final String USERNAME_HEADER = "X-Username";
+
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
         return ReactiveSecurityContextHolder.getContext()
@@ -25,9 +28,9 @@ public class PropagateUserHeadersGatewayFilter implements GlobalFilter, Ordered 
                     if (ctx.getAuthentication() instanceof JwtAuthenticationToken jwt) {
                         return chain.filter(mutateForJwt(exchange, jwt));
                     }
-                    return chain.filter(stripAuthorizationOnly(exchange));
+                    return chain.filter(stripUntrustedHeaders(exchange));
                 })
-                .switchIfEmpty(chain.filter(stripAuthorizationOnly(exchange)));
+                .switchIfEmpty(chain.filter(stripUntrustedHeaders(exchange)));
     }
 
     private static ServerWebExchange mutateForJwt(ServerWebExchange exchange, JwtAuthenticationToken jwt) {
@@ -40,19 +43,31 @@ public class PropagateUserHeadersGatewayFilter implements GlobalFilter, Ordered 
         }
         String subject = jwt.getToken().getSubject();
         ServerHttpRequest.Builder b = exchange.getRequest().mutate();
+        // Identity headers arriving from the public client are untrusted. Remove them before
+        // writing the values derived from the validated JWT; ServerHttpRequest.Builder.header()
+        // appends and would otherwise leave two values whose interpretation depends on the
+        // downstream server's "first vs last" header behavior.
+        b.headers(h -> {
+            h.remove(HttpHeaders.AUTHORIZATION);
+            h.remove(USER_ID_HEADER);
+            h.remove(USERNAME_HEADER);
+        });
         if (uidStr != null) {
-            b.header("X-User-Id", uidStr);
+            b.header(USER_ID_HEADER, uidStr);
         }
         if (subject != null) {
-            b.header("X-Username", subject);
+            b.header(USERNAME_HEADER, subject);
         }
-        b.headers(h -> h.remove(HttpHeaders.AUTHORIZATION));
         return exchange.mutate().request(b.build()).build();
     }
 
-    private static ServerWebExchange stripAuthorizationOnly(ServerWebExchange exchange) {
+    private static ServerWebExchange stripUntrustedHeaders(ServerWebExchange exchange) {
         ServerHttpRequest req = exchange.getRequest().mutate()
-                .headers(h -> h.remove(HttpHeaders.AUTHORIZATION))
+                .headers(h -> {
+                    h.remove(HttpHeaders.AUTHORIZATION);
+                    h.remove(USER_ID_HEADER);
+                    h.remove(USERNAME_HEADER);
+                })
                 .build();
         return exchange.mutate().request(req).build();
     }

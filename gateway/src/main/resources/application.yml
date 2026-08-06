@@ -32,7 +32,9 @@ spring:
       # Avoid duplicate Access-Control-* when the backend also adds CORS (e.g. CorsFilter on 8081).
       default-filters:
         - DedupeResponseHeader=Access-Control-Allow-Credentials Access-Control-Allow-Origin Vary
-        - AddRequestHeader=X-Gateway-Internal, ${INTERNAL_GATEWAY_TOKEN:dev-internal-gateway-token-min-32-chars-long!!}
+        # Set (replace), do not Add (append): a public client may send a forged copy of this header.
+        # The gateway must forward exactly one value, sourced from its own configuration.
+        - SetRequestHeader=X-Gateway-Internal, ${INTERNAL_GATEWAY_TOKEN:dev-internal-gateway-token-min-32-chars-long!!}
 
       # Browser (Vite on another port) calls http://localhost:8080 → cross-origin.
       # Without this, OPTIONS preflight can fail and the real POST never reaches the backend (no logs there).
@@ -58,9 +60,9 @@ spring:
         # output). Must precede backend-api below (same reasoning as backend-github-long-ops: a
         # Path=/api/** predicate would otherwise swallow /api/ai/** and forward it to the Java
         # backend on 8081, which has no such route). No user-identity header propagation needed
-        # here — draft-task takes no space-scoped parameters at all, so there's no permission
-        # boundary to enforce at this hop; JWT authentication alone (already enforced globally for
-        # /api/** by GatewaySecurityConfig) is the only gate this route needs. A longer
+        # here beyond the global JWT-derived X-User-Id/X-Username propagation — draft-task takes no
+        # space-scoped parameters, so JWT authentication (already enforced globally for /api/**) is
+        # the only authorization decision this route needs. A longer
         # response-timeout than the default 10s is real, not padding: local-model latency measured
         # live in ai-service's own eval was P95 23s / max 27s (see ai-service/README.md
         # "AI-assisted task creation").
@@ -97,14 +99,74 @@ spring:
           metadata:
             response-timeout: ${GATEWAY_AI_PLAN_RESPONSE_TIMEOUT_MS:120000}
             connect-timeout: ${GATEWAY_HTTP_CONNECT_TIMEOUT_MS:5000}
+        # SSE variant of starting a rollout (POST /plan-epic/rollout/stream) — same carve-out reasoning
+        # as ai-service-sprint-recovery-stream above: no CircuitBreaker (it buffers/wraps a streamed
+        # body), and MUST be registered before ai-service-plan-epic-rollout immediately below, whose
+        # `/**` predicate would otherwise greedily match this same path first.
+        - id: ai-service-plan-epic-rollout-stream
+          uri: ${AI_SERVICE_URL:http://127.0.0.1:8200}
+          predicates:
+            - Path=/api/ai/plan-epic/rollout/stream
+          filters:
+            - StripPrefix=2
+          metadata:
+            response-timeout: ${GATEWAY_AI_PLAN_RESPONSE_TIMEOUT_MS:120000}
+            connect-timeout: ${GATEWAY_HTTP_CONNECT_TIMEOUT_MS:5000}
+        # Durable epic-rollout workflow (app/planning/rollout_graph.py) — POST to start (a plan-epic
+        # generation, same cost/timeout shape as ai-service-plan-epic above), GET to poll status
+        # (cheap, a Postgres read), POST .../decision to resume (a commit loop against jira-backend,
+        # one issue per graph step — bounded by how many issues one plan has, same order of magnitude
+        # as the initial generation). `**` (not an explicit `/{threadId}/decision` predicate) because
+        # Spring Cloud Gateway's `Path` predicate needs a literal segment count match otherwise, and
+        # this route has two different valid depths (`/rollout/{id}` vs `/rollout/{id}/decision`).
+        - id: ai-service-plan-epic-rollout
+          uri: ${AI_SERVICE_URL:http://127.0.0.1:8200}
+          predicates:
+            - Path=/api/ai/plan-epic/rollout/**,/api/ai/plan-epic/rollout
+          filters:
+            - StripPrefix=2
+            - name: CircuitBreaker
+              args:
+                name: aiServicePlanning
+                fallbackUri: forward:/fallback
+          metadata:
+            response-timeout: ${GATEWAY_AI_PLAN_RESPONSE_TIMEOUT_MS:120000}
+            connect-timeout: ${GATEWAY_HTTP_CONNECT_TIMEOUT_MS:5000}
+        # SSE variant of the two sprint-recovery calls that actually chain real LLM calls (start,
+        # clarify) — same reasoning as ai-service-ask-stream below: no CircuitBreaker filter, since
+        # Resilience4j's reactive breaker buffers/wraps the response to invoke a fallback, which works
+        # against a streamed body. MUST be registered before the general ai-service-sprint-recovery
+        # route immediately below: that route's `/**` predicate would otherwise greedily match these
+        # same paths first and route them through its CircuitBreaker, breaking the stream.
+        - id: ai-service-sprint-recovery-stream
+          uri: ${AI_SERVICE_URL:http://127.0.0.1:8200}
+          predicates:
+            - Path=/api/ai/sprint-recovery/start/stream,/api/ai/sprint-recovery/*/clarify/stream,/api/ai/sprint-recovery/*/decision/stream
+          filters:
+            - StripPrefix=2
+          metadata:
+            response-timeout: ${GATEWAY_AI_PLAN_RESPONSE_TIMEOUT_MS:120000}
+            connect-timeout: ${GATEWAY_HTTP_CONNECT_TIMEOUT_MS:5000}
+        # Sprint-recovery durable workflow (app/sprint_recovery/graph.py) — diagnosis/plan-generation
+        # calls are real LLM calls (same timeout budget as plan-epic above); decision/retry/trigger-
+        # reevaluation resume a commit loop against jira-backend, bounded by one plan's action count.
+        - id: ai-service-sprint-recovery
+          uri: ${AI_SERVICE_URL:http://127.0.0.1:8200}
+          predicates:
+            - Path=/api/ai/sprint-recovery/**,/api/ai/sprint-recovery
+          filters:
+            - StripPrefix=2
+            - name: CircuitBreaker
+              args:
+                name: aiServicePlanning
+                fallbackUri: forward:/fallback
+          metadata:
+            response-timeout: ${GATEWAY_AI_PLAN_RESPONSE_TIMEOUT_MS:120000}
+            connect-timeout: ${GATEWAY_HTTP_CONNECT_TIMEOUT_MS:5000}
         # Agentic Q&A (POST /ask -> CragAgent: up to a few retrieve-and-reassess rounds, each a real
-        # LLM call). `spaceIds` is supplied by the *caller* (the frontend, sourced from SpaceContext —
-        # the spaces jira-backend already returned as this user's own space list), not re-validated
-        # against space membership at this hop. That is a deliberate match to jira-backend's own
-        # baseline today: ActiveSpaceGuard (jira-backend) only checks a space exists/isn't deleted,
-        # not that the caller is a member of it — the same trust boundary the rest of this app already
-        # has, not a new, stricter or looser one introduced here. JWT authentication (global) is still
-        # required to reach this route at all.
+        # LLM call). The caller supplies `spaceIds`, but ai-service revalidates them against the
+        # authenticated X-User-Id before retrieval; the model never controls this scope. JWT
+        # authentication at the gateway and membership validation in ai-service are both required.
         #
         # 300s default, not 90s: a real measurement against the local dev model (see
         # eval/prompt_injection_probe.py's run, ai-service `stageTimings`) found a demanding multi-hop

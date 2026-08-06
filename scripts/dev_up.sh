@@ -108,12 +108,12 @@ echo "Starting the AtlasCart / Ask-AI local dev stack..."
 echo "(safe to re-run — anything already up is left alone)"
 echo ""
 
-# --- 1. Docker infra: Postgres, vecdb, Redis, Kafka+ZK, MinIO, litellm -------------------------
+# --- 1. Docker infra: Postgres, vecdb, Redis, Kafka+ZK, MinIO ---------------------------------
 echo "--- Docker infra ---"
 if port_open 5432 && port_open 5433 && port_open 6379; then
     say_ok "Postgres / vecdb / Redis already up"
 else
-    say_start "docker compose up -d (postgres, vecdb, redis, kafka, minio, litellm...)"
+    say_start "docker compose up -d (postgres, vecdb, redis, kafka, minio...)"
     (cd "$ROOT" && docker compose up -d) >"$LOG_DIR/docker-compose.log" 2>&1
     wait_for_port 5432 60 "Postgres"
     wait_for_port 5433 60 "vecdb"
