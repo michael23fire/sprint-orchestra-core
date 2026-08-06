@@ -8,6 +8,7 @@ endpoint, and through it the ai-service) get ranked chunk hits back, not raw SQL
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import List, Sequence
 
@@ -17,6 +18,8 @@ import numpy as np
 from app.db.rrf import fuse_rrf
 from app.models import (
     Chunk,
+    IssueAttachment,
+    IssueAttachmentsQueryResult,
     IssueChange,
     IssueChangeQueryResult,
     IssueComment,
@@ -61,8 +64,8 @@ class VectorStore:
                         """
                         INSERT INTO chunks
                             (id, embedding, chunk_type, issue_id, issue_key, space_id,
-                             source_id, chunk_index, content, updated_at)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+                             source_id, chunk_index, content, page_number, provenance, updated_at)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
                         """,
                         [
                             (
@@ -75,6 +78,8 @@ class VectorStore:
                                 c.source_id,
                                 c.chunk_index,
                                 c.content,
+                                c.page_number,
+                                json.dumps(c.provenance),
                             )
                             for c, v in zip(chunks, vectors)
                         ],
@@ -88,6 +93,30 @@ class VectorStore:
             source_id,
         )
         return _rows_affected(result)
+
+    async def get_vlm_result(self, cache_key: str) -> str | None:
+        """Return a durable VLM extraction result by content-addressed key, if present.
+
+        This table intentionally stores only a hash and extracted text, never the original attachment
+        bytes.  It lets at-least-once Kafka replay reuse a completed paid VLM call after a crash.
+        """
+        return await self._pool.fetchval(
+            "SELECT content FROM vlm_result_cache WHERE cache_key = $1", cache_key
+        )
+
+    async def put_vlm_result(self, cache_key: str, namespace: str, mime_type: str, content: str) -> None:
+        """Persist the first completed VLM result; duplicates are equivalent and safely ignored."""
+        await self._pool.execute(
+            """
+            INSERT INTO vlm_result_cache (cache_key, namespace, mime_type, content)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (cache_key) DO NOTHING
+            """,
+            cache_key,
+            namespace,
+            mime_type,
+            content,
+        )
 
     async def delete_issue(self, issue_id: int) -> int:
         """Delete every chunk belonging to an issue — its issue, comment, and attachment chunks — and
@@ -116,22 +145,26 @@ class VectorStore:
         counted. ingested_at is bumped to now() on every upsert; created_at/updated_at are the issue's
         own lifecycle timestamps and are preserved as sent (may be null until the producer emits them).
         """
-        # priority is deliberately NOT in this INSERT's column list beyond ON CONFLICT preservation —
-        # IssueIngestionMessage never carries it (see IssueMetadata.priority's docstring), so a plain
-        # column here would overwrite an already-self-healed priority with NULL on every re-embed.
-        # ON CONFLICT leaves the existing priority value alone; only append_issue_change's dedicated
-        # "priority" branch ever sets it.
+        # priority IS in this INSERT/UPDATE now (unlike the first version of this method) — see
+        # IssueIngestionMessage.priority's docstring for why: it's commonly set once at creation and
+        # never changed again, so relying solely on append_issue_change's history-stream self-heal
+        # left every such issue permanently NULL here (found live against real AtlasCart data — zero
+        # priority field_change history events existed for it at all, only for an unrelated older
+        # seed dataset). ON CONFLICT overwrites priority with whatever this upsert carries, same as
+        # status/sprint_id — safe because the source of truth (jira-backend) is what's driving this,
+        # not a stale value this table invented itself.
         await self._pool.execute(
             """
             INSERT INTO issues
-                (issue_id, issue_key, space_id, issue_type, status, sprint_id, sprint_name,
+                (issue_id, issue_key, space_id, issue_type, status, priority, sprint_id, sprint_name,
                  title, parent_key, created_at, updated_at, ingested_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
             ON CONFLICT (issue_id) DO UPDATE SET
                 issue_key   = EXCLUDED.issue_key,
                 space_id    = EXCLUDED.space_id,
                 issue_type  = EXCLUDED.issue_type,
                 status      = EXCLUDED.status,
+                priority    = EXCLUDED.priority,
                 sprint_id   = EXCLUDED.sprint_id,
                 sprint_name = EXCLUDED.sprint_name,
                 title       = EXCLUDED.title,
@@ -140,7 +173,7 @@ class VectorStore:
                 updated_at  = EXCLUDED.updated_at,
                 ingested_at = now()
             """,
-            meta.issue_id, meta.issue_key, meta.space_id, meta.issue_type, meta.status,
+            meta.issue_id, meta.issue_key, meta.space_id, meta.issue_type, meta.status, meta.priority,
             meta.sprint_id, meta.sprint_name, meta.title, meta.parent_key, meta.created_at,
             meta.updated_at,
         )
@@ -229,11 +262,13 @@ class VectorStore:
                         msg.issue_id, msg.to_value, msg.emitted_at,
                     )
                 elif msg.field_name == "priority":
-                    # Same self-heal as status/issueType above: jira-backend already fires this
-                    # field_change unconditionally on every priority edit (IssueService.java's
-                    # `update()`), but priority-only edits never trigger a content event, so this
-                    # history stream is the only path that keeps the `issues` snapshot's priority
-                    # current — see migrations/008.
+                    # Same self-heal as status/issueType above: jira-backend fires this field_change
+                    # unconditionally on every priority edit (IssueService.java's `update()`), but a
+                    # priority-only edit never triggers a content event, so this history stream is
+                    # what keeps the snapshot current for LATER edits. The upsert path
+                    # (IssueIngestionMessage now carries priority too) is what covers the initial
+                    # value at creation — this branch and that path are complementary, not redundant.
+                    # See migrations/008.
                     await conn.execute(
                         "UPDATE issues SET priority = $2, updated_at = $3 WHERE issue_id = $1",
                         msg.issue_id, msg.to_value, msg.emitted_at,
@@ -398,6 +433,48 @@ class VectorStore:
                 IssueDetail(
                     id=r["id"], issue_id=r["issue_id"], issue_key=r["issue_key"],
                     source_id=r["source_id"], content=r["content"], chunk_index=r["chunk_index"],
+                )
+                for r in rows
+            ],
+        )
+
+    async def get_issue_attachments(
+        self, space_ids: Sequence[int], issue_keys: Sequence[str], limit: int = 200
+    ) -> IssueAttachmentsQueryResult:
+        """Every `chunk_type='attachment'` chunk for specific issues, complete and in order — not a
+        semantic-search top-K.
+
+        The `get_issue_comments`/`get_issue_details` sibling, over parsed attachment text. Exists
+        because a query for a fact the caller doesn't already know the exact wording of (a SKU, an
+        ID, a code buried in a PDF table) cannot reliably be phrased as a search query that ranks the
+        right chunk highly — found live, this made "what SKU does ATC-46's attachment use" flip
+        between finding the answer and abstaining across otherwise-equivalent phrasings of the same
+        question. Once the issue key is known (the question always names it), this makes the lookup
+        exact instead of a ranking gamble.
+        """
+        total = await self._pool.fetchval(
+            "SELECT count(*) FROM chunks WHERE space_id = ANY($1::bigint[]) AND chunk_type = 'attachment' "
+            "AND issue_key = ANY($2::text[])",
+            list(space_ids), list(issue_keys),
+        )
+        rows = await self._pool.fetch(
+            """
+            SELECT id, issue_id, issue_key, source_id, content, chunk_index, page_number, provenance
+            FROM chunks
+            WHERE space_id = ANY($1::bigint[]) AND chunk_type = 'attachment' AND issue_key = ANY($2::text[])
+            ORDER BY issue_key, page_number NULLS FIRST, chunk_index
+            LIMIT $3
+            """,
+            list(space_ids), list(issue_keys), limit,
+        )
+        return IssueAttachmentsQueryResult(
+            total_count=total or 0,
+            attachments=[
+                IssueAttachment(
+                    id=r["id"], issue_id=r["issue_id"], issue_key=r["issue_key"],
+                    source_id=r["source_id"], content=r["content"], chunk_index=r["chunk_index"],
+                    page_number=r["page_number"],
+                    provenance=r["provenance"] or {},
                 )
                 for r in rows
             ],
@@ -575,7 +652,7 @@ class VectorStore:
         """
         rows = await self._pool.fetch(
             """
-            SELECT id, chunk_type, issue_id, issue_key, space_id, source_id, content,
+            SELECT id, chunk_type, issue_id, issue_key, space_id, source_id, content, page_number, provenance,
                    1 - (embedding <=> $1) AS score
             FROM chunks
             WHERE space_id = ANY($2::bigint[])
@@ -594,7 +671,7 @@ class VectorStore:
         """Lexical retrieval over the same chunk rows, via Postgres FTS (ts_rank_cd)."""
         rows = await self._pool.fetch(
             """
-            SELECT id, chunk_type, issue_id, issue_key, space_id, source_id, content,
+            SELECT id, chunk_type, issue_id, issue_key, space_id, source_id, content, page_number, provenance,
                    ts_rank_cd(search_vector, plainto_tsquery('english', $1)) AS score
             FROM chunks
             WHERE space_id = ANY($2::bigint[])
@@ -643,4 +720,6 @@ def _row_to_hit(row: asyncpg.Record, retrievers: List[str]) -> SearchHit:
         content=row["content"],
         score=float(row["score"]),
         retrievers=retrievers,
+        page_number=row["page_number"],
+        provenance=row["provenance"] or {},
     )

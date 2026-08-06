@@ -107,3 +107,17 @@ async def test_cross_encoder_reranker_scores_issue_key_alongside_content():
         result = await reranker.rerank("ATLAS-42", [hit], top_n=5)
 
     assert result[0].score == pytest.approx(0.9)
+
+
+@pytest.mark.asyncio
+async def test_cross_encoder_reranker_keeps_page_provenance():
+    hit = SearchHit(
+        id="page", chunk_type="attachment", issue_id=1, issue_key="ATLAS-42", space_id=1,
+        source_id=9, content="invoice total", score=0.5, retrievers=["vector"], page_number=3,
+    )
+    with patch("sentence_transformers.CrossEncoder", return_value=_FakeCrossEncoder({
+        "ATLAS-42 invoice total": 0.9,
+    })):
+        result = await CrossEncoderReranker("fake-model").rerank("invoice", [hit], top_n=1)
+
+    assert result[0].page_number == 3

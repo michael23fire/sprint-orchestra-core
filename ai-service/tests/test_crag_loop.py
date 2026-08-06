@@ -10,6 +10,7 @@ from app.agent.crag_loop import (
     _initial_tool_choice,
 )
 from app.agent.retrieval_tool import (
+    IssueAttachmentsResult,
     IssueCommentsResult,
     IssueDetailsResult,
     IssueHistoryResult,
@@ -44,7 +45,7 @@ class FakeLLM:
 class FakeRetrieval:
     def __init__(
         self, results_by_query=None, default=None, issue_result=None, history_result=None,
-        sprint_result=None, comments_result=None, details_result=None,
+        sprint_result=None, comments_result=None, details_result=None, attachments_result=None,
     ):
         self._results_by_query = results_by_query or {}
         self._default = default or []
@@ -57,12 +58,14 @@ class FakeRetrieval:
         )
         self._comments_result = comments_result or IssueCommentsResult(total_count=0, comments=[])
         self._details_result = details_result or IssueDetailsResult(total_count=0, details=[])
+        self._attachments_result = attachments_result or IssueAttachmentsResult(total_count=0, attachments=[])
         self.calls = []  # (query, space_ids, limit, mode)
         self.issue_calls = []  # (space_ids, filters)
         self.history_calls = []  # (space_ids, filters)
         self.sprint_calls = []  # (space_ids, filters)
         self.comments_calls = []  # (space_ids, issue_keys)
         self.details_calls = []  # (space_ids, issue_keys)
+        self.attachments_calls = []  # (space_ids, issue_keys)
 
     async def search(self, query, space_ids, limit, mode="hybrid"):
         self.calls.append((query, tuple(space_ids), limit, mode))
@@ -87,6 +90,10 @@ class FakeRetrieval:
     async def get_issue_details(self, space_ids, issue_keys, limit=200):
         self.details_calls.append((tuple(space_ids), tuple(issue_keys)))
         return self._details_result
+
+    async def get_issue_attachments(self, space_ids, issue_keys, limit=200):
+        self.attachments_calls.append((tuple(space_ids), tuple(issue_keys)))
+        return self._attachments_result
 
     async def aclose(self):
         return None
@@ -136,6 +143,17 @@ def _issue_details_turn(tool_input: dict, call_id: str = "id_1") -> LLMTurn:
     )
 
 
+def _issue_attachments_turn(tool_input: dict, call_id: str = "ia_1") -> LLMTurn:
+    return LLMTurn(
+        stop_reason="tool_use",
+        text="",
+        tool_calls=[ToolCall(id=call_id, name="get_issue_attachments", input=tool_input)],
+        assistant_message={"role": "assistant", "content": [
+            {"type": "tool_use", "id": call_id, "name": "get_issue_attachments", "input": tool_input}
+        ]},
+    )
+
+
 def _tool_use_turn(query: str, call_id: str = "call_1") -> LLMTurn:
     return LLMTurn(
         stop_reason="tool_use",
@@ -155,9 +173,10 @@ def _end_turn(text: str) -> LLMTurn:
 
 
 class Hit:
-    def __init__(self, id, issue_key="X-1", chunk_type="issue", source_id=1, content="c", score=1.0, retrievers=None):
+    def __init__(self, id, issue_key="X-1", chunk_type="issue", source_id=1, content="c", score=1.0, retrievers=None, page_number=None):
         self.id, self.issue_key, self.chunk_type, self.source_id = id, issue_key, chunk_type, source_id
         self.content, self.score, self.retrievers = content, score, retrievers or ["vector"]
+        self.page_number = page_number
 
 
 def test_initial_router_matches_the_reported_regression_questions():
@@ -433,7 +452,7 @@ async def test_system_prompt_carries_current_time_for_relative_time_questions():
     assert stamped.second == 0 and stamped.minute % 5 == 0
     assert captured["tools"] == [
         "search_knowledge_base", "query_issues", "query_sprints", "get_issue_history",
-        "get_issue_comments", "get_issue_details",
+        "get_issue_comments", "get_issue_details", "get_issue_attachments",
     ]
 
 
@@ -469,6 +488,23 @@ async def test_query_issues_passes_sprint_filters_through():
 
     assert retrieval.sprint_calls == [((7,), {})]
     assert retrieval.issue_calls[0][1] == {"sprint_ids": [501], "issue_types": ["bug"]}
+
+
+async def test_query_issues_passes_priorities_filter_through():
+    # Regression test: priorities was advertised in the tool schema and documented in the system
+    # prompt, but the whitelist in _run_issue_query omitted it, so it was silently dropped before
+    # reaching the retrieval client — every priority-filtered question silently fell back to an
+    # unfiltered query (see docs/RAG_ACCURACY_CASE_STUDIES.md).
+    llm = FakeLLM([
+        _issue_query_turn({"priorities": ["highest"]}),
+        _end_turn("done"),
+    ])
+    retrieval = FakeRetrieval()
+    agent = CragAgent(llm, retrieval, max_iterations=4, top_k=5)
+
+    await agent.ask("how many issues are highest priority", space_ids=[7])
+
+    assert retrieval.issue_calls[0][1] == {"priorities": ["highest"]}
 
 
 async def test_query_issues_passes_issue_keys_for_topic_current_state_intersection():
@@ -693,6 +729,43 @@ async def test_get_issue_details_is_dispatched_and_grounds_the_answer_with_citat
     assert result.abstained is False
     assert [c.issue_key for c in result.citations] == ["ATC-43"]
     assert "double click" in result.citations[0].content
+
+
+async def test_get_issue_attachments_is_dispatched_and_grounds_the_answer_with_citations():
+    # Reproduces the live flakiness (docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 24):
+    # search_knowledge_base's semantic/hybrid ranking can only be as good as the words the model
+    # guesses, so an exact fact it doesn't already know the wording of (a SKU code) can genuinely miss
+    # even though it's in the index — found live, this made "what SKU does ATC-46's attachment use"
+    # flip between finding the answer and abstaining across equivalent phrasings. Once the issue key
+    # is known, get_issue_attachments makes the lookup exact instead of a ranking gamble.
+    attachments_result = IssueAttachmentsResult(
+        total_count=1,
+        attachments=[{
+            "issue_id": 5000935, "issue_key": "ATC-46", "source_id": 5000940,
+            "page_number": 2,
+            "provenance": {"source_type": "pdf", "page_number": 2},
+            "content": "Acceptance criteria table: SKU A-104, order reference BETA-1043, quantity 1.",
+        }],
+    )
+    llm = FakeLLM([
+        _tool_use_turn("ATC-46 attachment"),
+        _issue_attachments_turn({"issue_keys": ["ATC-46"]}),
+        _end_turn("The worked example uses SKU A-104 and order reference BETA-1043 (ATC-46)."),
+    ])
+    retrieval = FakeRetrieval(
+        default=[],
+        attachments_result=attachments_result,
+    )
+    agent = CragAgent(llm, retrieval, max_iterations=4, top_k=5)
+
+    result = await agent.ask("what SKU does ATC-46's attachment use?", space_ids=[7])
+
+    assert retrieval.attachments_calls == [((7,), ("ATC-46",))]
+    assert result.abstained is False
+    assert [c.issue_key for c in result.citations] == ["ATC-46"]
+    assert "A-104" in result.citations[0].content
+    assert result.citations[0].page_number == 2
+    assert result.citations[0].provenance["source_type"] == "pdf"
 
 
 async def test_citation_picks_the_chunk_that_actually_supports_the_answer_not_the_first_one():

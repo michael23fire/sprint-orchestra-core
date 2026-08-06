@@ -42,6 +42,8 @@ def fuse_rrf(*ranked_lists: List[SearchHit], limit: int, k: int = RRF_K) -> List
             content=by_id[cid].content,
             score=fused_score[cid],
             retrievers=sorted(retrievers_by_id[cid]),
+            page_number=by_id[cid].page_number,
+            provenance=by_id[cid].provenance,
         )
         for cid in ranked_ids
     ]

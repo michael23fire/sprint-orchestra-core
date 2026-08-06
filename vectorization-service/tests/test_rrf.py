@@ -3,10 +3,11 @@ from app.db.rrf import fuse_rrf
 from app.models import SearchHit
 
 
-def _hit(cid: str, retriever: str) -> SearchHit:
+def _hit(cid: str, retriever: str, page_number: int | None = None) -> SearchHit:
     return SearchHit(
         id=cid, chunk_type="issue", issue_id=1, issue_key="X-1", space_id=1,
         source_id=1, content=f"content for {cid}", score=0.0, retrievers=[retriever],
+        page_number=page_number,
     )
 
 
@@ -48,3 +49,8 @@ def test_single_retriever_only_still_works():
     vector = [_hit("a", "vector"), _hit("b", "vector")]
     fused = fuse_rrf(vector, limit=10)
     assert [h.id for h in fused] == ["a", "b"]
+
+
+def test_fusion_keeps_page_provenance():
+    fused = fuse_rrf([_hit("page", "vector", page_number=4)], limit=1)
+    assert fused[0].page_number == 4

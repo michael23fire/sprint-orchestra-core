@@ -33,6 +33,9 @@ import asyncpg
 from app.config import Settings
 from app.db.pool import create_pool
 from app.db.vector_store import VectorStore
+from app.ingest.contextualizer import build_context_generator
+from app.ingest.vlm_cache import CachedVlmImageDescriber
+from app.ingest.vlm_describer import build_vlm_describer, vlm_cache_namespace
 from app.ingest.embedder import build_embedder
 from app.ingest.pipeline import IngestPipeline
 from app.models import (
@@ -62,11 +65,22 @@ async def _fetch_issues(jira_pool: asyncpg.Pool, space_ids: Optional[List[int]])
     # membership is ingested — without them every issue lands with a NULL sprint and the
     # /issues/query sprint filter can never match. LEFT JOIN: a backlog issue (no sprint) is kept
     # with NULLs, not dropped.
+    #
+    # issue_type/status/parent_key (via a self-join to resolve parent_id -> its issue_key) must be
+    # selected here too: upsert_issue's ON CONFLICT unconditionally overwrites these columns with
+    # whatever IssueIngestionMessage carries (by design — the live Kafka path always has the true
+    # current value, so an unconditional overwrite is correct there). This query used to omit all
+    # three, so IssueIngestionMessage silently defaulted them to None on every backfill run, and each
+    # run quietly nulled out real, already-correct issue_type/status/parent_key in the vector store —
+    # found live after running --include-attachments and then seeing query_issues(issue_types=['bug'])
+    # return 0 for a space with 11 real bugs.
     query = """
-        SELECT i.id, i.issue_key, i.space_id, i.title, i.description, i.updated_at,
-               i.sprint_id, s.name AS sprint_name
+        SELECT i.id, i.issue_key, i.space_id, i.title, i.description, i.created_at, i.updated_at,
+               i.sprint_id, s.name AS sprint_name, i.issue_type, i.status, i.priority,
+               i.parent_id, p.issue_key AS parent_key, p.title AS parent_title
         FROM issues i
         LEFT JOIN sprints s ON s.id = i.sprint_id
+        LEFT JOIN issues p ON p.id = i.parent_id
     """
     if space_ids:
         query += " WHERE i.space_id = ANY($1::bigint[])"
@@ -84,6 +98,25 @@ async def _fetch_issue_sprints(jira_pool: asyncpg.Pool, space_ids: Optional[List
     """
     if space_ids:
         query += " WHERE i.space_id = ANY($1::bigint[])"
+        return await jira_pool.fetch(query, space_ids)
+    return await jira_pool.fetch(query)
+
+
+async def _fetch_issue_priority(jira_pool: asyncpg.Pool, space_ids: Optional[List[int]]):
+    """Just each issue's current priority from the authoritative source — the input to the fast,
+    embed-free --issue-priority-only correction.
+
+    Why this correction was needed at all: priority is usually set once at issue creation and never
+    changed again, so it has no field_change history row for jira-backend's history-stream self-heal
+    to replay (confirmed live against real AtlasCart data — zero priority history rows exist for it).
+    IssueIngestionMessage now carries priority on every upsert going forward (see that model's
+    docstring), but issues ingested before that field existed still need this one-time correction —
+    same shape as --issue-sprints-only, for the same underlying reason (a field added after the
+    initial ingestion, not retroactively present on already-ingested rows).
+    """
+    query = "SELECT id, issue_key, space_id, priority FROM issues"
+    if space_ids:
+        query += " WHERE space_id = ANY($1::bigint[])"
         return await jira_pool.fetch(query, space_ids)
     return await jira_pool.fetch(query)
 
@@ -138,6 +171,14 @@ async def main() -> None:
              "sprint_name) from the source DB. Use when issues were already ingested but landed with "
              "a NULL sprint; touches only those two columns, re-embeds nothing.",
     )
+    parser.add_argument(
+        "--issue-priority-only", action="store_true",
+        help="Fast, embed-free correction of issues' current priority from the source DB. Use when "
+             "issues were already ingested before IssueIngestionMessage carried priority — most "
+             "issues have it set once at creation with no field_change history row to self-heal "
+             "from, so this is the only way to backfill the initial value; touches only that one "
+             "column, re-embeds nothing.",
+    )
     args = parser.parse_args()
     space_ids = [int(s) for s in args.space_ids.split(",") if s.strip()] or None
 
@@ -152,7 +193,22 @@ async def main() -> None:
     jira_pool = await asyncpg.create_pool(jira_dsn, min_size=1, max_size=4)
     embedder = build_embedder(settings)
     store = VectorStore(vec_pool)
-    pipeline = IngestPipeline(settings, embedder, store)
+    # Was omitted here (defaulting IngestPipeline to a no-op context generator) even when
+    # VEC_CONTEXTUAL_RETRIEVAL_ENABLED=true — the live Kafka path (app/main.py) already wires this up
+    # correctly; the backfill script just never matched it, so every backfill-produced chunk silently
+    # skipped contextualization regardless of the setting. Found live: re-ran the attachment backfill
+    # expecting contextualized chunks and found byte-identical content to the pre-fix run.
+    context_generator = build_context_generator(settings)
+    # Same class of bug as the context_generator comment above, caught this time before it shipped:
+    # this script builds its own IngestPipeline separately from app/main.py's, so any dependency added
+    # there has to be matched here too or it silently no-ops for every backfill run.
+    raw_vlm_describer = build_vlm_describer(settings)
+    vlm_describer = (
+        CachedVlmImageDescriber(raw_vlm_describer, store, vlm_cache_namespace(settings))
+        if settings.vlm_ocr_enabled
+        else raw_vlm_describer
+    )
+    pipeline = IngestPipeline(settings, embedder, store, context_generator, vlm_describer)
 
     try:
         if args.issue_sprints_only:
@@ -174,6 +230,24 @@ async def main() -> None:
                         assigned += 1
             print(f"issue-sprints-only: matched {matched}/{len(rows)} issues in the vec store; "
                   f"{assigned} now have a sprint, the rest are backlog (NULL).")
+            return
+
+        if args.issue_priority_only:
+            rows = await _fetch_issue_priority(jira_pool, space_ids)
+            matched = has_priority = 0
+            for row in rows:
+                # Same shape as --issue-sprints-only above: a bare, idempotent UPDATE keyed on
+                # issue_id, touching only the one column. Safe to re-run.
+                res = await vec_pool.execute(
+                    "UPDATE issues SET priority = $2 WHERE issue_id = $1",
+                    row["id"], row["priority"],
+                )
+                if res.rsplit(" ", 1)[-1] != "0":
+                    matched += 1
+                    if row["priority"] is not None:
+                        has_priority += 1
+            print(f"issue-priority-only: matched {matched}/{len(rows)} issues in the vec store; "
+                  f"{has_priority} now have a priority set.")
             return
 
         if args.truncate_first:
@@ -218,8 +292,16 @@ async def main() -> None:
                     space_id=row["space_id"],
                     title=row["title"],
                     description=row["description"],
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
                     sprint_id=row["sprint_id"],
                     sprint_name=row["sprint_name"],
+                    issue_type=row["issue_type"],
+                    status=row["status"],
+                    priority=row["priority"],
+                    parent_issue_id=row["parent_id"],
+                    parent_key=row["parent_key"],
+                    parent_title=row["parent_title"],
                 )
                 await pipeline.handle_issue(msg)
 
@@ -265,6 +347,8 @@ async def main() -> None:
         print(f"\ndone -> {await store.count()} chunks now in the vector store")
     finally:
         await embedder.aclose()
+        await context_generator.aclose()
+        await vlm_describer.aclose()
         await vec_pool.close()
         await jira_pool.close()
 

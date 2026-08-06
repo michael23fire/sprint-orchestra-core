@@ -13,13 +13,18 @@ import java.time.Instant;
  * default max message size. Attachments are handled separately (see {@link AttachmentUploadedEvent})
  * because their binaries are large and fetched from object storage.
  *
- * <p>Also carries the issue's structured metadata ({@code issueType}, {@code status}, lifecycle
- * timestamps, and which sprint it's currently in): the vectorization service keeps an issue-level
- * metadata table alongside its vectors so the AI agent can answer exact counting/filtering questions
- * ("how many bugs?", "how many issues in the active sprint?") that top-K semantic search structurally
- * cannot. Metadata-only edits (e.g. a status or sprint change with no text change) do NOT fire this
- * event — they reach the consumer through {@link IssueHistoryRecordedEvent} instead, which avoids
- * spending an embedding call on a change that doesn't affect the vector.
+ * <p>Also carries the issue's structured metadata ({@code issueType}, {@code status},
+ * {@code priority}, lifecycle timestamps, and which sprint it's currently in): the vectorization
+ * service keeps an issue-level metadata table alongside its vectors so the AI agent can answer exact
+ * counting/filtering questions ("how many bugs?", "how many issues in the active sprint?") that top-K
+ * semantic search structurally cannot. Metadata-only edits (e.g. a status or sprint change with no
+ * text change) do NOT fire this event — they reach the consumer through
+ * {@link IssueHistoryRecordedEvent} instead, which avoids spending an embedding call on a change that
+ * doesn't affect the vector. {@code priority} is the one field carried in BOTH places: here, so the
+ * metadata table gets the current value from the very first upsert (most issues have their priority
+ * set once at creation and never changed again — a history-only sync would never see that initial
+ * value); and self-healed via the history stream too (vectorization-service's
+ * {@code append_issue_change}), for the less common case of a genuine later priority edit.
  *
  * <p>Also carries the PARENT issue's key/title, when this issue is a subtask (null otherwise): a
  * subtask's own title+description is often too terse to be findable or correctly characterized on its
@@ -38,6 +43,7 @@ public record IssueContentChangedEvent(
         String description,
         String issueType,
         String status,
+        String priority,
         Long sprintId,
         String sprintName,
         Long parentId,

@@ -120,7 +120,7 @@ public class IssueService {
         applicationEventPublisher.publishEvent(new IssueContentChangedEvent(
                 saved.getId(), saved.getIssueKey(), saved.getSpace().getId(),
                 saved.getTitle(), saved.getDescription(),
-                saved.getIssueType(), saved.getStatus(),
+                saved.getIssueType(), saved.getStatus(), saved.getPriority(),
                 saved.getSprint() != null ? saved.getSprint().getId() : null,
                 saved.getSprint() != null ? saved.getSprint().getName() : null,
                 saved.getParent() != null ? saved.getParent().getId() : null,
@@ -241,7 +241,7 @@ public class IssueService {
             applicationEventPublisher.publishEvent(new IssueContentChangedEvent(
                     saved.getId(), saved.getIssueKey(), saved.getSpace().getId(),
                     saved.getTitle(), saved.getDescription(),
-                    saved.getIssueType(), saved.getStatus(),
+                    saved.getIssueType(), saved.getStatus(), saved.getPriority(),
                     saved.getSprint() != null ? saved.getSprint().getId() : null,
                     saved.getSprint() != null ? saved.getSprint().getName() : null,
                     saved.getParent() != null ? saved.getParent().getId() : null,

@@ -87,7 +87,7 @@ app:
   kafka:
     # Publish after attachment upload (after DB commit). Payload is tracking-only for pipelines / POC.
     attachment-ingestion:
-      enabled: ${APP_KAFKA_ATTACHMENT_INGESTION_ENABLED:false}
+      enabled: ${APP_KAFKA_ATTACHMENT_INGESTION_ENABLED:true}
       topic: ${APP_KAFKA_ATTACHMENT_INGESTION_TOPIC:jira.attachment.ingestion}
     # Publish after issue/comment create/update/delete (after DB commit). Consumed by the
     # vectorization-service for RAG ingestion (chunk -> embed -> upsert into pgvector).

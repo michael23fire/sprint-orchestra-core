@@ -6,8 +6,8 @@ the product feature (answering a question) composes them.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Sequence
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence
 
 import httpx
 
@@ -24,6 +24,10 @@ class RetrievedChunk:
     content: str
     score: float
     retrievers: List[str]
+    # 1-based source PDF page when parser provenance is available; null for non-page sources and
+    # legacy chunks. Preserved end-to-end so UI citations can deep-link to the right PDF page.
+    page_number: Optional[int] = None
+    provenance: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -71,6 +75,19 @@ class IssueDetailsResult:
 
     total_count: int
     details: List[dict]
+
+
+@dataclass(slots=True)
+class IssueAttachmentsResult:
+    """Result of a complete, unranked fetch of issues' attachment text — see vectorization-service's
+    /issues/attachments. The `chunk_type='attachment'` counterpart to IssueCommentsResult/
+    IssueDetailsResult: the deterministic fallback to search_knowledge_base when a specific fact
+    inside an attachment (an exact SKU, an ID) can't reliably be found by a semantic/hybrid query that
+    doesn't already know its wording. `attachments` are raw dicts (issue_id, issue_key, source_id,
+    content)."""
+
+    total_count: int
+    attachments: List[dict]
 
 
 @dataclass(slots=True)
@@ -129,6 +146,8 @@ class RetrievalClient:
             RetrievedChunk(
                 id=h["id"], chunk_type=h["chunk_type"], issue_id=h["issue_id"], issue_key=h["issue_key"],
                 source_id=h["source_id"], content=h["content"], score=h["score"], retrievers=h["retrievers"],
+                page_number=h.get("page_number"),
+                provenance=h.get("provenance") or {},
             )
             for h in body["hits"]
         ]
@@ -205,6 +224,23 @@ class RetrievalClient:
         return IssueDetailsResult(
             total_count=body["total_count"],
             details=body.get("details", []),
+        )
+
+    async def get_issue_attachments(
+        self, space_ids: Sequence[int], issue_keys: Sequence[str], limit: int = 200
+    ) -> IssueAttachmentsResult:
+        """Complete, unranked attachment-text fetch against vectorization-service /issues/attachments.
+        Same security shape as query_issues: space_ids injected here from the authenticated caller,
+        never model-supplied."""
+        payload = {"space_ids": list(space_ids), "issue_keys": list(issue_keys), "limit": limit}
+        resp = await self._client.post(
+            "/issues/attachments", json=payload, headers={"x-request-id": get_request_id()}
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        return IssueAttachmentsResult(
+            total_count=body["total_count"],
+            attachments=body.get("attachments", []),
         )
 
     async def query_sprints(

@@ -78,6 +78,7 @@ _TOOL_STAGE_LABELS = {
     "get_issue_history": "checking issue change history",
     "get_issue_comments": "reading issue comments",
     "get_issue_details": "reading issue details",
+    "get_issue_attachments": "reading issue attachments",
 }
 
 _SEARCH_TOOL = {
@@ -145,8 +146,9 @@ _ISSUE_QUERY_TOOL = {
             },
             "priorities": {
                 "type": "array", "items": {"type": "string"},
-                "description": "Filter to these priorities, e.g. ['high']. Only current values are "
-                               "known — see get_issue_history for past priority changes.",
+                "description": "Filter to these priorities. Known values: low, medium, high, highest. "
+                               "Only current values are known — see get_issue_history for past "
+                               "priority changes.",
             },
             "sprint_ids": {
                 "type": "array", "items": {"type": "integer"},
@@ -293,6 +295,32 @@ _ISSUE_DETAILS_TOOL = {
     },
 }
 
+_ISSUE_ATTACHMENTS_TOOL = {
+    "name": "get_issue_attachments",
+    "description": (
+        "Fetch the COMPLETE, unranked parsed text of every attachment (PDF, spreadsheet, screenshot, "
+        "log, etc.) on specific issue(s) you have already identified by key — the counterpart to "
+        "get_issue_comments/get_issue_details, but for attachment content. Use this whenever a "
+        "question asks about the content of a document/file/attachment on an already-identified issue "
+        "(e.g. 'what SKU does ATC-46's attachment use', 'what does the log attached to ATC-43 show') "
+        "and search_knowledge_base's results don't already contain the specific detail you need. This "
+        "matters especially for an exact code, ID, or number you don't already know the wording of: "
+        "a semantic/hybrid search query can only be as good as the words you guess, so a search that "
+        "comes back empty is NOT proof the fact isn't there — call this with the issue's key to read "
+        "its attachment text directly and completely before concluding the information is missing."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "issue_keys": {
+                "type": "array", "items": {"type": "string"},
+                "description": "Fetch every attachment's parsed text on these issues, e.g. ['ATC-46'].",
+            },
+        },
+        "required": ["issue_keys"],
+    },
+}
+
 def _current_time_for_prompt() -> str:
     """Current UTC time, rounded down to the nearest 5 minutes.
 
@@ -320,19 +348,25 @@ or assumptions about what a typical system might do.
 The current UTC time is {now_utc}. Use it to resolve relative time in questions ("just now", "in the \
 last hour", "past 3 months") into concrete ISO timestamps for tool filters.
 
-You have six tools, and choosing the right one is the most important decision you make:
-- search_knowledge_base — semantic/keyword search over issue, comment, AND SPRINT GOAL text. Use it \
-for questions about content or meaning: "why did X break", "how did we fix Y", "what does issue Z \
-say", "which sprint's goal was about accessibility". A sprint's goal is real prose indexed here \
-(chunk_type=sprint) — trust what this tool returns over anything that merely sounds similar in an \
-issue's own text.
+You have seven tools, and choosing the right one is the most important decision you make:
+- search_knowledge_base — semantic/keyword search over issue, comment, SPRINT GOAL, AND ATTACHMENT \
+text. Use it for questions about content or meaning: "why did X break", "how did we fix Y", "what \
+does issue Z say", "which sprint's goal was about accessibility", "what does the log/report/spec \
+attached to X show". A sprint's goal is real prose indexed here (chunk_type=sprint) — trust what this \
+tool returns over anything that merely sounds similar in an issue's own text. Attachments (PDFs, \
+markdown, spreadsheets, CSVs, screenshots) are parsed to text and indexed here too (chunk_type= \
+attachment) — a citation with this chunk type is the content of an uploaded file, not the issue's own \
+description; don't assume a detail must be in a comment just because it isn't in the issue body.
 - query_issues — structured lookup over issue METADATA (type, status, priority, sprint, parent_key, \
 timestamps), returning exact counts. Use it for counting, listing, filtering, and recency of CURRENT \
 state: "how many bugs", "list the stories", "which are blocked", "what was updated most recently", \
 "how many \
 issues are in sprint N" (filter by sprint_ids/sprint_names), "which epic does X belong to" / "what is \
 the parent of X" (issue_keys=[X], read parent_key off the result — do not guess this from \
-search_knowledge_base). search_knowledge_base returns only its top few best guesses, so it can NEVER \
+search_knowledge_base), "how many issues are highest priority" / "list the high priority bugs" \
+(priorities=['highest'] / ['high'] — known priority values are low, medium, high, highest; ALWAYS pass \
+the priorities filter when the question names a specific priority level, never omit it and read the \
+unfiltered total instead). search_knowledge_base returns only its top few best guesses, so it can NEVER \
 answer a "how many" or "list all" question correctly — those need query_issues.
 - query_sprints — structured lookup over sprint METADATA (dates, status, velocity/points), NOT the \
 issues inside a sprint. Use it for "how many sprints", "which sprint is active", "what's sprint N's \
@@ -358,6 +392,15 @@ several hits for that key: those hits are commonly ALL comments, because an issu
 can have its own single title+description chunk rank below them — a pile of comment hits is not proof \
 the issue's own description was retrieved. Never answer a "what is/says" question about a named issue \
 from comments alone, or abstain claiming its details are unavailable, without calling this first.
+- get_issue_attachments — the COMPLETE, unranked parsed text of every attachment on issue(s) you have \
+already identified by key — the get_issue_comments/get_issue_details of attachment content (PDFs, \
+spreadsheets, screenshots, logs). This matters MOST for an exact fact you don't already know the \
+wording of (a SKU, an ID, a code in a table): search_knowledge_base's semantic/hybrid ranking can only \
+be as good as the words you guess, so it can genuinely miss an exact value that's sitting right there \
+in an attachment — an empty or weak search_knowledge_base result for a named issue's attachment is NOT \
+proof the fact isn't there. If a question names a specific issue and asks about its attachment/ \
+document/file content, and search_knowledge_base didn't already surface the specific value you need, \
+call this with that issue's key before abstaining.
 
 Combine tools when a question spans them (e.g. "how many bugs are about checkout": query_issues for \
 the type filter + search_knowledge_base for the topic; "what did I just edit and what does that \
@@ -471,6 +514,14 @@ class AgentAnswer:
     retrieval_rounds: int
     queries_used: List[str]
     citations: List[RetrievedChunk] = field(default_factory=list)
+    # Human-readable results of structured tool calls (query_issues/query_sprints/get_issue_history)
+    # this turn actually made — the same `result_text` already handed to the model as each tool's
+    # result, just also kept here. Exists specifically so an eval harness scoring "is this answer
+    # grounded in what was retrieved" (e.g. RAGAS faithfulness) has somewhere to look up a claim like
+    # "ATC-77 is blocked" — `citations` alone only ever covers search_knowledge_base/get_issue_*
+    # prose, never a structured tool's own facts, so a claim sourced purely from query_issues had no
+    # matching context to be scored against. See docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 23.
+    structured_evidence: List[str] = field(default_factory=list)
     abstained: bool = False
     usage: Usage = field(default_factory=Usage)
     estimated_cost_usd: float = 0.0
@@ -482,7 +533,8 @@ class AgentAnswer:
 
 class CragAgent:
     def __init__(
-        self, llm: LLMClient, retrieval: RetrievalClient, max_iterations: int, top_k: int, model: str = ""
+        self, llm: LLMClient, retrieval: RetrievalClient, max_iterations: int, top_k: int, model: str = "",
+        faithfulness_check_enabled: bool = False,
     ):
         self._llm = llm
         self._retrieval = retrieval
@@ -491,12 +543,16 @@ class CragAgent:
         # Used only for $-cost estimation (app/llm/pricing.py) — the LLM client already knows its own
         # model for the actual API call; the agent needs the name separately just to price tokens.
         self._model = model
+        self._faithfulness_check_enabled = faithfulness_check_enabled
         # Rebuilt at the start of every ask() with the current UTC time; this default only exists so
         # a direct _timed_llm_call in a test doesn't explode.
         self._system = _system_prompt("1970-01-01T00:00:00Z")
         # Registry of deterministic post-generation verifiers (see Case Studies 15/17 in
         # docs/RAG_ACCURACY_CASE_STUDIES.md). Additional relationship verifiers can be registered
-        # here without adding branches to the main ask loop.
+        # here without adding branches to the main ask loop. `_check_faithfulness` is intentionally
+        # NOT in this list (see `_apply_verification`) — it needs the retrieved context itself, which
+        # this list's uniform (text, space_ids, subject_keys) signature doesn't carry, unlike these
+        # two, which re-query their own source of truth instead of needing it passed in.
         self._post_generation_verifiers = [
             self._check_subtask_claims,
             self._check_current_state_claims,
@@ -526,6 +582,7 @@ class CragAgent:
         messages.append({"role": "user", "content": question})
         queries_used: List[str] = []
         citations: List[RetrievedChunk] = []
+        structured_evidence: List[str] = []
         seen_citation_ids: set = set()
         evidence_issue_keys: set[str] = set()
         subject_issue_keys: set[str] = {k.upper() for k in _ISSUE_KEY_RE.findall(question)}
@@ -547,7 +604,7 @@ class CragAgent:
                 turn = await self._timed_llm_call(
                     messages,
                     [_SEARCH_TOOL, _ISSUE_QUERY_TOOL, _SPRINT_QUERY_TOOL, _ISSUE_HISTORY_TOOL,
-                     _ISSUE_COMMENTS_TOOL, _ISSUE_DETAILS_TOOL],
+                     _ISSUE_COMMENTS_TOOL, _ISSUE_DETAILS_TOOL, _ISSUE_ATTACHMENTS_TOOL],
                     tool_choice=required_tool,
                 )
                 total_usage = total_usage + turn.usage
@@ -562,7 +619,7 @@ class CragAgent:
                     stage("verifying and finalizing the answer")
                     text, selected_citations, verify_usage = await self._apply_verification(
                         text, messages, citations, evidence_issue_keys, semantic_used,
-                        structured_used, space_ids, subject_issue_keys,
+                        structured_used, space_ids, subject_issue_keys, structured_evidence,
                     )
                     total_usage = total_usage + verify_usage
                     return AgentAnswer(
@@ -570,6 +627,7 @@ class CragAgent:
                         retrieval_rounds=retrieval_rounds,
                         queries_used=queries_used,
                         citations=selected_citations,
+                        structured_evidence=structured_evidence,
                         abstained=ABSTENTION_PHRASE in text,
                         usage=total_usage,
                         estimated_cost_usd=self._cost(total_usage),
@@ -598,7 +656,7 @@ class CragAgent:
                     stage("verifying and finalizing the answer")
                     text, selected_citations, verify_usage = await self._apply_verification(
                         text, messages, citations, evidence_issue_keys, semantic_used,
-                        structured_used, space_ids, subject_issue_keys,
+                        structured_used, space_ids, subject_issue_keys, structured_evidence,
                     )
                     total_usage = total_usage + verify_usage
                     return AgentAnswer(
@@ -606,6 +664,7 @@ class CragAgent:
                         retrieval_rounds=retrieval_rounds,
                         queries_used=queries_used,
                         citations=selected_citations,
+                        structured_evidence=structured_evidence,
                         abstained=ABSTENTION_PHRASE in text,
                         usage=total_usage,
                         estimated_cost_usd=self._cost(total_usage),
@@ -636,15 +695,18 @@ class CragAgent:
                         result_text, result_keys = await self._run_issue_query(call.input, space_ids)
                         evidence_issue_keys.update(result_keys)
                         structured_used = True
+                        structured_evidence.append(result_text)
                         retrieval_rounds += 1
                     elif call.name == _SPRINT_QUERY_TOOL["name"]:
                         result_text = await self._run_sprint_query(call.input, space_ids)
                         structured_used = True
+                        structured_evidence.append(result_text)
                         retrieval_rounds += 1
                     elif call.name == _ISSUE_HISTORY_TOOL["name"]:
                         result_text, result_keys = await self._run_issue_history(call.input, space_ids)
                         evidence_issue_keys.update(result_keys)
                         structured_used = True
+                        structured_evidence.append(result_text)
                         retrieval_rounds += 1
                     elif call.name == _ISSUE_COMMENTS_TOOL["name"]:
                         issue_keys_arg = [k for k in call.input.get("issue_keys", []) if isinstance(k, str)]
@@ -676,6 +738,21 @@ class CragAgent:
                                 seen_citation_ids.add(h.id)
                                 citations.append(h)
                         result_text = _format_issue_details(hits, issue_keys_arg)
+                    elif call.name == _ISSUE_ATTACHMENTS_TOOL["name"]:
+                        issue_keys_arg = [k for k in call.input.get("issue_keys", []) if isinstance(k, str)]
+                        hits = await self._run_issue_attachments(issue_keys_arg, space_ids)
+                        # Same grounding contract as get_issue_comments/get_issue_details: this hands
+                        # the model raw attachment text, so the citation-required rule below must
+                        # apply to it too.
+                        semantic_used = True
+                        retrieval_rounds += 1
+                        for h in hits:
+                            evidence_issue_keys.add(h.issue_key.upper())
+                            evidence_issue_keys.update(k.upper() for k in _ISSUE_KEY_RE.findall(h.content))
+                            if h.id not in seen_citation_ids:
+                                seen_citation_ids.add(h.id)
+                                citations.append(h)
+                        result_text = _format_issue_attachments(hits, issue_keys_arg)
                     elif call.name == _SEARCH_TOOL["name"]:
                         query = call.input.get("query", "")
                         mode = call.input.get("mode", "hybrid")
@@ -705,7 +782,8 @@ class CragAgent:
 
             # Defensive fallback — the loop above normally returns before reaching this point.
             return AgentAnswer(text=ABSTENTION_PHRASE, retrieval_rounds=retrieval_rounds,
-                                queries_used=queries_used, citations=citations, abstained=True,
+                                queries_used=queries_used, citations=citations,
+                                structured_evidence=structured_evidence, abstained=True,
                                 usage=total_usage, estimated_cost_usd=self._cost(total_usage),
                                 stage_seconds=dict(stage_seconds))
         finally:
@@ -743,8 +821,9 @@ class CragAgent:
     ) -> tuple[str, set[str]]:
         # Pass only the whitelisted, model-controllable filter fields downstream — never let the model
         # smuggle in space_ids or arbitrary keys. The retrieval client injects space_ids itself.
-        allowed = ("issue_keys", "issue_types", "statuses", "sprint_ids", "sprint_names", "created_after",
-                   "created_before", "updated_after", "updated_before", "order_by", "order", "limit")
+        allowed = ("issue_keys", "issue_types", "statuses", "priorities", "sprint_ids", "sprint_names",
+                   "created_after", "created_before", "updated_after", "updated_before", "order_by",
+                   "order", "limit")
         filters = {k: model_input[k] for k in allowed if k in model_input and model_input[k] is not None}
         start = time.perf_counter()
         try:
@@ -862,6 +941,39 @@ class CragAgent:
             for d in result.details
         ]
 
+    async def _run_issue_attachments(
+        self, issue_keys: Sequence[str], space_ids: Sequence[int]
+    ) -> List[RetrievedChunk]:
+        """Complete, unranked attachment-text fetch — the get_issue_comments/get_issue_details
+        sibling, over parsed attachment content. Returned as RetrievedChunk for the same reason: it
+        flows through the exact same citation/grounding path a search hit would (see the dispatch
+        site) — the model still must cite what it quotes, and the UI still gets a real, inspectable
+        source, not just a text blob."""
+        if not issue_keys:
+            return []
+        start = time.perf_counter()
+        try:
+            result = await self._retrieval.get_issue_attachments(space_ids, issue_keys)
+        finally:
+            elapsed = time.perf_counter() - start
+            RETRIEVAL_CALL_SECONDS.observe(elapsed)
+            _add_stage_seconds("retrieval", elapsed)
+        return [
+            RetrievedChunk(
+                id=f"issue_attachments:{a.get('source_id')}",
+                chunk_type="attachment",
+                issue_id=a.get("issue_id", 0),
+                issue_key=str(a.get("issue_key", "")),
+                source_id=a.get("source_id", 0),
+                content=a.get("content", ""),
+                score=0.0,
+                retrievers=["issue_attachments"],
+                page_number=a.get("page_number"),
+                provenance=a.get("provenance") or {},
+            )
+            for a in result.attachments
+        ]
+
     async def _apply_verification(
         self,
         text: str,
@@ -872,6 +984,7 @@ class CragAgent:
         structured_used: bool,
         space_ids: Sequence[int],
         subject_issue_keys: set[str],
+        structured_evidence: List[str] = (),
     ) -> Tuple[str, List[RetrievedChunk], Usage]:
         """Ground the answer, then run every registered post-generation verifier exactly once.
 
@@ -899,6 +1012,18 @@ class CragAgent:
             found, verifier_usage = await verifier(text, space_ids, subject_issue_keys)
             mismatches.extend(found)
             usage = usage + verifier_usage
+
+        # Runtime faithfulness guardrail (off by default — see config.py's faithfulness_check_enabled
+        # docstring for the cost tradeoff). Separate from the loop above: this needs the actual
+        # retrieved context passed in, not a re-query of a specific structured relationship, so it
+        # doesn't fit the uniform (text, space_ids, subject_keys) verifier signature the other two use.
+        if self._faithfulness_check_enabled:
+            found, faith_usage = await self._check_faithfulness(
+                text, selected_citations, structured_evidence
+            )
+            mismatches.extend(found)
+            usage = usage + faith_usage
+
         if not mismatches:
             return text, selected_citations, usage
 
@@ -912,6 +1037,66 @@ class CragAgent:
             corrected_text, citations, evidence_issue_keys, semantic_used, structured_used
         )
         return corrected_text, selected_citations, usage
+
+    async def _check_faithfulness(
+        self, text: str, citations: List[RetrievedChunk], structured_evidence: List[str]
+    ) -> Tuple[List[ClaimMismatch], Usage]:
+        """Runtime faithfulness guardrail: ask a fast, focused check whether THIS answer's claims are
+        actually supported by what was retrieved for THIS request — the online counterpart to RAGAS's
+        faithfulness metric (eval/ragas_eval.py), which only ever measures this offline, after the
+        fact, against a fixed golden set. A live hallucination in production gets no RAGAS score at
+        all; this is the check that can actually catch one before the caller sees it.
+
+        Same "check, then correct once via the shared retry" shape as
+        `_check_subtask_claims`/`_check_current_state_claims`, but doesn't fit their uniform
+        (text, space_ids, subject_keys) signature — this one needs the retrieved context itself
+        (citations' text + structured tool results), not a re-query of one specific relationship.
+        """
+        context = "\n\n".join([c.content for c in citations] + list(structured_evidence))
+        if not context.strip():
+            # Nothing to check faithfulness against — an abstention or a pure-reasoning answer with
+            # no retrieved evidence at all (already filtered out by the ABSTENTION_PHRASE check in
+            # _apply_verification for the abstention case; this covers the rarer non-abstaining case
+            # with truly empty context).
+            return [], Usage()
+
+        check_system = (
+            "You are a strict fact-checking assistant. You only ever answer in the exact format "
+            "requested."
+        )
+        check_user = (
+            "Context (retrieved evidence):\n"
+            f'"""\n{context}\n"""\n\n'
+            "Answer to check:\n"
+            f'"""\n{text}\n"""\n\n'
+            "Does the answer contain any factual claim that is NOT supported by the context above? "
+            "Ignore phrasing/style differences — only flag claims the context does not actually "
+            "back up. If every claim is supported, respond with exactly: SUPPORTED\n"
+            "Otherwise respond with exactly one line per unsupported claim, each starting with "
+            '"UNSUPPORTED: " followed by the specific claim.'
+        )
+        start = time.perf_counter()
+        try:
+            check = await self._llm.next_turn(
+                check_system, [{"role": "user", "content": check_user}], [],
+            )
+        finally:
+            elapsed = time.perf_counter() - start
+            LLM_CALL_SECONDS.observe(elapsed)
+            _add_stage_seconds("llm", elapsed)
+
+        lines = [ln.strip() for ln in check.text.splitlines() if ln.strip()]
+        unsupported = [ln[len("UNSUPPORTED:"):].strip() for ln in lines if ln.upper().startswith("UNSUPPORTED:")]
+        if not unsupported:
+            return [], check.usage
+        mismatches = [
+            ClaimMismatch(
+                issue_key="(faithfulness)",
+                detail=f"Not supported by retrieved evidence: {claim}",
+            )
+            for claim in unsupported
+        ]
+        return mismatches, check.usage
 
     async def _check_subtask_claims(
         self, text: str, space_ids: Sequence[int], subject_keys: set[str]
@@ -1098,7 +1283,8 @@ def _format_hits(hits: List[RetrievedChunk]) -> str:
     if not hits:
         return "No results found."
     return "\n\n".join(
-        f"[{h.issue_key}] (chunk_type={h.chunk_type}, retrievers={h.retrievers})\n{h.content}"
+        f"[{h.issue_key}] (chunk_type={h.chunk_type}, retrievers={h.retrievers}"
+        f"{f', page={h.page_number}' if h.page_number is not None else ''})\n{h.content}"
         for h in hits
     )
 
@@ -1369,3 +1555,12 @@ def _format_issue_details(hits: List[RetrievedChunk], requested_keys: List[str])
             "(either the key doesn't exist in scope, or that issue has no title/description text)."
         )
     return "\n\n".join(f"[{h.issue_key}] (issue title+description)\n{h.content}" for h in hits)
+
+
+def _format_issue_attachments(hits: List[RetrievedChunk], requested_keys: List[str]) -> str:
+    if not hits:
+        return (
+            f"No attachment content found for {requested_keys or 'the requested issue(s)'} "
+            "(either the key doesn't exist in scope, or that issue has no attachments/none could be parsed)."
+        )
+    return "\n\n".join(f"[{h.issue_key}] (attachment)\n{h.content}" for h in hits)

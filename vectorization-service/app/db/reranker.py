@@ -85,6 +85,8 @@ class CrossEncoderReranker:
                 content=hit.content,
                 score=float(score),
                 retrievers=hit.retrievers,
+                page_number=hit.page_number,
+                provenance=hit.provenance,
             )
             for hit, score in ranked[:top_n]
         ]

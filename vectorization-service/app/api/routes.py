@@ -17,12 +17,25 @@ from datetime import date, datetime
 from typing import List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.observability import EMBED_SECONDS, RERANK_SECONDS, RETRIEVAL_SECONDS, get_request_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _blank_to_none(value: object) -> object:
+    """Treat an empty string as "not provided" for an optional datetime filter.
+
+    Caught live: a strict-JSON-schema tool-calling model (gpt-5.6-luna over /v1/responses) fills
+    every declared property rather than omitting the ones it doesn't want to filter on, and its
+    placeholder for "no value" on an optional string-typed field is `""`, not `null` — a real
+    difference in how strict function-calling models express "unset" versus the local/Anthropic paths
+    this endpoint was originally exercised against. `""` fails `datetime` validation outright, so
+    without this the whole query 422s instead of just ignoring the (non-)filter.
+    """
+    return None if value == "" else value
 
 
 @router.get("/healthz")
@@ -102,6 +115,8 @@ class SearchHitOut(BaseModel):
     content: str
     score: float
     retrievers: List[str]
+    page_number: int | None = None
+    provenance: dict = Field(default_factory=dict)
 
 
 class SearchResponse(BaseModel):
@@ -201,6 +216,10 @@ class IssueQueryRequest(BaseModel):
     order: Literal["asc", "desc"] = "desc"
     limit: int = Field(default=20, ge=1, le=200)
 
+    _blank_dates = field_validator(
+        "created_after", "created_before", "updated_after", "updated_before", mode="before"
+    )(_blank_to_none)
+
 
 class IssueRowOut(BaseModel):
     issue_id: int
@@ -281,6 +300,8 @@ class IssueHistoryRequest(BaseModel):
     # (from='done' AND to<>'done') isn't expressible through the generic filters above.
     reopened_only: bool = False
     limit: int = Field(default=20, ge=1, le=200)
+
+    _blank_dates = field_validator("since", "until", mode="before")(_blank_to_none)
 
 
 class IssueChangeOut(BaseModel):
@@ -437,6 +458,68 @@ async def issue_details(req: IssueDetailsRequest, request: Request) -> IssueDeta
         details=[
             IssueDetailOut(issue_id=d.issue_id, issue_key=d.issue_key, source_id=d.source_id, content=d.content)
             for d in result.details
+        ],
+    )
+
+
+class IssueAttachmentsRequest(BaseModel):
+    """Complete, unranked attachment-text fetch for specific issues — see
+    VectorStore.get_issue_attachments."""
+
+    space_ids: List[int] = Field(min_length=1, description="Caller's authorized spaces (permission scope).")
+    issue_keys: List[str] = Field(min_length=1, description="Fetch every attachment chunk on these issues, e.g. ['ATC-46'].")
+    limit: int = Field(default=200, ge=1, le=500)
+
+
+class IssueAttachmentOut(BaseModel):
+    issue_id: int
+    issue_key: str
+    source_id: int
+    content: str
+    page_number: int | None = None
+    provenance: dict = Field(default_factory=dict)
+
+
+class IssueAttachmentsResponse(BaseModel):
+    total_count: int
+    attachments: List[IssueAttachmentOut]
+
+
+@router.post("/issues/attachments", response_model=IssueAttachmentsResponse)
+async def issue_attachments(req: IssueAttachmentsRequest, request: Request) -> IssueAttachmentsResponse:
+    """The `chunk_type='attachment'` counterpart to /issues/comments and /issues/details: every
+    parsed-attachment chunk for named issues, fetched by exact key, not a semantic top-K.
+
+    Exists because a semantic/hybrid query can't reliably be phrased to find a specific fact (an
+    exact SKU, an ID) it doesn't already know the wording of — found live, "what SKU does ATC-46's
+    attachment use" flipped between finding the answer and abstaining across otherwise-equivalent
+    phrasings of the same question, even though the fact was always in the index (see
+    docs/RAG_ACCURACY_CASE_STUDIES.md). This is a plain exact-match SELECT against `chunks`, no
+    embedding call, so an issue's attachment content cannot be missed once its key is known.
+    """
+    store = request.app.state.store
+    try:
+        result = await store.get_issue_attachments(req.space_ids, req.issue_keys, limit=req.limit)
+    except Exception as exc:  # noqa: BLE001 - same clean-502 contract as /search
+        raise HTTPException(status_code=502, detail=f"issue attachments query failed: {exc}") from exc
+
+    logger.info(
+        "issue attachments fetch completed",
+        extra={"request_id": get_request_id(), "total_count": result.total_count,
+               "returned": len(result.attachments), "issue_keys": req.issue_keys},
+    )
+    return IssueAttachmentsResponse(
+        total_count=result.total_count,
+        attachments=[
+            IssueAttachmentOut(
+                issue_id=a.issue_id,
+                issue_key=a.issue_key,
+                source_id=a.source_id,
+                content=a.content,
+                page_number=a.page_number,
+                provenance=a.provenance,
+            )
+            for a in result.attachments
         ],
     )
 
