@@ -16,8 +16,10 @@ from app.drafting.instructor_client import _ReasoningContentTransport
 class _FakeWrappedTransport(httpx.AsyncBaseTransport):
     def __init__(self, response: httpx.Response):
         self._response = response
+        self.seen_requests = []
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.seen_requests.append(request)
         return self._response
 
 
@@ -82,6 +84,40 @@ async def test_leaves_response_untouched_when_neither_field_has_content():
     )
 
     assert response is inner
+
+
+async def test_renames_max_tokens_to_max_completion_tokens_on_the_outgoing_request():
+    """Regression test for a live-found total outage: against this project's configured production
+    model (hosted OpenAI gpt-5.6-luna), every structured-output call 400'd on `max_tokens` and each
+    caller's own graceful-degradation path swallowed it, so Plan Epic / Draft Task / Sprint Health all
+    silently served fallbacks with `degraded=True` instead of failing loudly.
+    """
+    wrapped = _FakeWrappedTransport(_completion_response({"content": "{}"}))
+    transport = _ReasoningContentTransport(wrapped)
+
+    await transport.handle_async_request(
+        httpx.Request(
+            "POST", "https://api.openai.com/v1/chat/completions",
+            json={"model": "gpt-5.6-luna", "max_tokens": 2000, "messages": []},
+        )
+    )
+
+    sent = json.loads(wrapped.seen_requests[0].content)
+    assert "max_tokens" not in sent
+    assert sent["max_completion_tokens"] == 2000
+    assert sent["model"] == "gpt-5.6-luna"  # everything else survives the rewrite
+
+
+async def test_leaves_a_request_without_max_tokens_alone():
+    wrapped = _FakeWrappedTransport(_completion_response({"content": "{}"}))
+    transport = _ReasoningContentTransport(wrapped)
+    original = httpx.Request(
+        "POST", "https://api.openai.com/v1/chat/completions", json={"model": "x", "messages": []}
+    )
+
+    await transport.handle_async_request(original)
+
+    assert wrapped.seen_requests[0] is original
 
 
 async def test_does_not_promote_genuine_free_form_reasoning_text():
