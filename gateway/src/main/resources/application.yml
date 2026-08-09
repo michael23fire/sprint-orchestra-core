@@ -141,7 +141,7 @@ spring:
         - id: ai-service-sprint-recovery-stream
           uri: ${AI_SERVICE_URL:http://127.0.0.1:8200}
           predicates:
-            - Path=/api/ai/sprint-recovery/start/stream,/api/ai/sprint-recovery/*/clarify/stream,/api/ai/sprint-recovery/*/decision/stream
+            - Path=/api/ai/sprint-recovery/start/stream,/api/ai/sprint-recovery/*/clarify/stream,/api/ai/sprint-recovery/*/decision/stream,/api/ai/sprint-recovery/*/trigger-reevaluation/stream
           filters:
             - StripPrefix=2
           metadata:

@@ -17,7 +17,9 @@ class EvidenceItem(BaseModel):
 
     citation_id: str = Field(..., description="Stable id within this workflow, e.g. 'ev1', 'ev2'.")
     issue_key: str
-    source_type: Literal["comment", "attachment", "history", "description", "structured"]
+    # "risk_signal" is a deterministic RiskSignal restated as citable evidence — see diagnose_node's
+    # comment on why signals have to be citable, not just described in the prompt.
+    source_type: Literal["comment", "attachment", "history", "description", "structured", "risk_signal"]
     content: str
 
 
@@ -76,3 +78,35 @@ class RecoveryPlan(BaseModel):
 
 class RecoveryPlanSet(BaseModel):
     plans: List[RecoveryPlan] = Field(..., min_length=1, max_length=3)
+
+
+class SprintIssueSummary(BaseModel):
+    """One issue's structural facts, carried forward from risk detection so later nodes can reason
+    about the sprint as a whole.
+
+    **Found live**: `_detect_risk_signals` already queried every issue in the sprint (status, owner,
+    points, priority) but returned only the signals it derived, throwing the rest away — so
+    `plan_node` could only ever act on issues that had independently tripped a per-issue signal.
+    That's why a sprint-level problem ("nobody has started anything") had no ticket to act on: not
+    because the data was missing, but because it wasn't passed along.
+    """
+
+    issue_key: str
+    title: Optional[str] = None
+    status: Optional[str] = None
+    priority: Optional[str] = None
+    assignee_name: Optional[str] = None
+    story_points: Optional[int] = None
+
+
+class SprintSnapshot(BaseModel):
+    """The whole sprint's shape at diagnosis time — the context a human applies automatically when
+    judging risk, which the workflow previously never had."""
+
+    sprint_name: Optional[str] = None
+    goal: Optional[str] = None
+    days_remaining: Optional[int] = None
+    elapsed_percent: Optional[int] = None
+    issues: List[SprintIssueSummary] = Field(default_factory=list)
+
+

@@ -17,9 +17,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 from app.api.routes import _authorize_space_ids, _authorize_workflow_state, _caller_identity
+from app.observability import SPRINT_RECOVERY_INDEX_CATCH_UP_TIMEOUTS_TOTAL
 from app.sprint_recovery.graph import (
     ON_STAGE_VAR,
+    _describe_action,
     build_escalation_summary,
+    flatten_escalation_summary,
     list_checkpoint_history,
     retry_recovery_commit,
     time_travel_resume,
@@ -53,7 +56,39 @@ def _register_if_waiting(request: Request, sprint_id: int, thread_id: str, value
         return
     trigger = getattr(request.app.state, "sprint_recovery_kafka_trigger", None)
     if trigger is not None:
-        trigger.register_waiting(sprint_id, thread_id)
+        tracked = {s.issue_key for s in (values.get("risk_signals") or []) if s.issue_key}
+        plan = values.get("approved_plan")
+        if plan is not None:
+            for action in plan.actions:
+                tracked.add(action.target_issue_key)
+                if action.depends_on_issue_key:
+                    tracked.add(action.depends_on_issue_key)
+        trigger.register_waiting(values["space_id"], sprint_id, thread_id, tracked)
+
+
+async def _auto_reevaluate_after_commit(graph, thread_id: str, values: dict) -> dict:
+    """If approving a plan just finished committing all its actions (status now
+    `waiting_reevaluation`), immediately re-check once instead of leaving the human staring at a
+    "Re-check now" button for a state the system could answer itself in the same request.
+
+    **Found live, from direct product feedback**: `waiting_reevaluation` is a real, intentional pause
+    — the whole point of `wait_for_reevaluation_node` is that it's resumable by either a human click
+    or a real Kafka event, and that dual-resume behavior is worth keeping and demoing on its own. But
+    making the human always be the one to notice and click, when the very actions they just approved
+    are what the Kafka event would react to anyway, adds a network round-trip's worth of dead air for
+    no benefit — "I approved a plan, now tell me what happened" is one action from the user's point of
+    view, not two. This chains exactly one `trigger_reevaluation` call, synchronously, in the same
+    request. `reevaluate_node` always resolves to `recovered`, `escalated`, or a fresh
+    `awaiting_plan_approval` — never back to `waiting_reevaluation` — so this cannot loop.
+
+    Reading a stale sprint here (the index hasn't caught up with the writes just committed) is a real
+    hazard this route used to guard against with a fixed 2-second sleep. That guess is gone:
+    `reevaluate_node` now waits on a recorded per-issue watermark instead, which covers *every* resume
+    path rather than just this one — see `_await_index_catch_up` in `app/sprint_recovery/graph.py`.
+    """
+    if values.get("status") != "waiting_reevaluation":
+        return values
+    return await trigger_reevaluation(graph, thread_id, source="auto_after_approve")
 
 
 async def _notify_if_escalated(request: Request, thread_id: str, sprint_id: int, values: dict) -> None:
@@ -69,7 +104,24 @@ async def _notify_if_escalated(request: Request, thread_id: str, sprint_id: int,
     summary = await build_escalation_summary(graph, thread_id)
     await notify_escalation(
         settings.sprint_recovery_escalation_webhook_url, thread_id, values["space_id"], sprint_id,
-        values["sprint_name"], summary,
+        values["sprint_name"], flatten_escalation_summary(summary),
+    )
+
+
+def _track_index_lag_if_timed_out(values: dict) -> None:
+    """Same "react from outside the node, once per actual reevaluation, not per poll" shape as
+    `_notify_if_escalated` — and the same reason: `reevaluate_node` itself isn't the safe place for this
+    increment, since a crash-and-resume could re-run the node and double-count. Aggregate counter, not
+    per-request messaging: `RecoveryStatusResponse.index_catch_up_timed_out` already tells one caller
+    about one check; this is what an on-call would actually watch to tell "one unlucky request" apart
+    from "the Kafka/vectorization-service pipeline is genuinely degraded."
+    """
+    if not values.get("index_catch_up_timed_out"):
+        return
+    SPRINT_RECOVERY_INDEX_CATCH_UP_TIMEOUTS_TOTAL.labels(str(values["space_id"])).inc()
+    logger.warning(
+        "sprint recovery reevaluation timed out waiting for the read model to catch up — reading anyway",
+        extra={"space_id": values["space_id"], "sprint_id": values["sprint_id"]},
     )
 
 
@@ -102,6 +154,13 @@ class EvidenceOut(_CamelModel):
     content: str
 
 
+class EscalationRoundOut(_CamelModel):
+    round: int
+    plan_name: str
+    rationale: str
+    actions: List[str]
+
+
 class RecoveryStatusResponse(_CamelModel):
     thread_id: str
     status: str
@@ -118,12 +177,27 @@ class RecoveryStatusResponse(_CamelModel):
     # inside approval_node — found live: a real revise-past-the-cap looked indistinguishable from a
     # normal rejection in the UI before this field existed.
     max_plan_revision_rounds: int
+    # Lets the UI say "Attempt 2 of 3" instead of a bare, meaningless "escalation round 1" — a reader
+    # can't tell how much runway is left from a counter with no denominator.
+    max_escalation_rounds: int
     token_usage: int
     error: Optional[str]
-    # Only ever populated when status=="escalated" — see build_escalation_summary's docstring. None the
-    # rest of the time rather than an empty string, so the frontend can tell "not applicable" apart
-    # from "computed and genuinely empty" (the latter can't actually happen, but the type says so).
-    escalation_summary: Optional[str] = None
+    # Only ever populated when status=="escalated" — see build_escalation_summary's docstring.
+    # Structured (a list of per-round cards + a separate reasons list), not a pre-flattened paragraph —
+    # found live that one run-on paragraph covering 3 rounds was unreadable in the UI.
+    escalation_rounds: List[EscalationRoundOut] = Field(default_factory=list)
+    escalation_still_at_risk_reasons: List[str] = Field(default_factory=list)
+    # Distinguishes two very different things that both land on status=="escalated" — see
+    # build_escalation_summary's docstring. Empty: every flagged issue was acted on at least once
+    # across the rounds above, so what remains is real engineering time, not more planning. Non-empty:
+    # these issue keys were never acted on at all (e.g. the token budget ran out first) — a real gap.
+    escalation_unaddressed_issue_keys: List[str] = Field(default_factory=list)
+    # True only on a status this workflow reached without confirming the read model had caught up with
+    # its own writes first (see `_await_index_catch_up`). Staleness can only ever bias a result toward
+    # looking *more* at-risk than reality (see the field's own comment in state.py) — surfaced so an
+    # "escalated"/"diagnosing" result right after actions were just approved doesn't read as an
+    # unexplained inconsistency. Never true on a fresh "diagnosing" that hasn't reevaluated anything yet.
+    index_catch_up_timed_out: bool = False
 
 
 def _status_response(thread_id: str, values: dict) -> RecoveryStatusResponse:
@@ -139,21 +213,27 @@ def _status_response(thread_id: str, values: dict) -> RecoveryStatusResponse:
         escalation_round=values.get("escalation_round", 0),
         plan_revision_round=values.get("plan_revision_round", 0),
         max_plan_revision_rounds=values.get("max_plan_revision_rounds", 2),
+        max_escalation_rounds=values.get("max_escalation_rounds", 2),
         token_usage=values.get("token_usage", 0),
         error=values.get("error"),
+        index_catch_up_timed_out=values.get("index_catch_up_timed_out", False),
     )
 
 
 async def _status_response_with_summary(thread_id: str, values: dict, graph) -> RecoveryStatusResponse:
-    """`_status_response` plus `escalation_summary` when status=="escalated" — separate from that sync
-    function because computing the summary needs an awaited `aget_state_history` walk. Safe to call on
-    every status, not just the moment of transition: unlike `_notify_if_escalated` (fires once, only on
-    a real transition), this is read-only and just makes "escalated" viewable correctly whenever this
-    thread's status is fetched — including reopening the modal long after the transition happened.
+    """`_status_response` plus the structured round-by-round summary (what was actually committed to
+    Jira) when status=="escalated" — separate from that sync function because computing the summary
+    needs an awaited `aget_state_history` walk. Safe to call on every status, not just the moment of
+    transition: unlike `_notify_if_escalated` (fires once, only on a real transition), this is
+    read-only and just makes "escalated" viewable correctly whenever this thread's status is fetched —
+    including reopening the modal long after the transition happened.
     """
     response = _status_response(thread_id, values)
     if response.status == "escalated":
-        response.escalation_summary = await build_escalation_summary(graph, thread_id)
+        summary = await build_escalation_summary(graph, thread_id)
+        response.escalation_rounds = [EscalationRoundOut(**r) for r in summary["rounds"]]
+        response.escalation_still_at_risk_reasons = summary["still_at_risk_reasons"]
+        response.escalation_unaddressed_issue_keys = summary["unaddressed_issue_keys"]
     return response
 
 
@@ -375,18 +455,22 @@ async def submit_recovery_decision_endpoint(
 
     await graph.ainvoke(Command(resume=resume_payload), config=config)
     final = await graph.aget_state(config)
-    _register_if_waiting(request, snap.values["sprint_id"], thread_id, final.values)
-    return _status_response(thread_id, final.values)
+    final_values = await _auto_reevaluate_after_commit(graph, thread_id, final.values)
+    _register_if_waiting(request, snap.values["sprint_id"], thread_id, final_values)
+    await _notify_if_escalated(request, thread_id, snap.values["sprint_id"], final_values)
+    _track_index_lag_if_timed_out(final_values)
+    return await _status_response_with_summary(thread_id, final_values, graph)
 
 
 @router.post("/{thread_id}/decision/stream")
 async def submit_recovery_decision_stream_endpoint(
     thread_id: str, req: DecisionRequest, request: Request
 ) -> StreamingResponse:
-    """SSE variant of POST /{thread_id}/decision — only `decision="revise"` ever makes a real LLM call
-    (it re-enters `plan_node`), but every decision type goes through this so the frontend has one call
-    to make regardless of which button was clicked; approve/edit/reject just won't emit a `stage` event
-    before their `result` arrives. See `_stream_call`.
+    """SSE variant of POST /{thread_id}/decision. `decision="revise"` makes a real LLM call re-entering
+    `plan_node`; `decision="approve"` can too, once indirectly — if committing finishes and
+    `_auto_reevaluate_after_commit` immediately re-checks, a still-at-risk sprint routes straight into
+    `plan_node` again in the same request (see that function's docstring). Both phases stream through
+    the same connection so a caller watching stage events sees the whole thing, not just the first half.
     """
     graph = _graph(request)
     config = {"configurable": {"thread_id": thread_id}}
@@ -402,13 +486,21 @@ async def submit_recovery_decision_stream_endpoint(
         try:
             async for event in _stream_call(graph.ainvoke(Command(resume=resume_payload), config=config)):
                 yield event
+            final = await graph.aget_state(config)
+            if final.values.get("status") == "waiting_reevaluation":
+                async for event in _stream_call(
+                    trigger_reevaluation(graph, thread_id, source="auto_after_approve")
+                ):
+                    yield event
         except Exception as exc:  # noqa: BLE001 - clean SSE error frame, same as ask_stream's backstop
             logger.exception("sprint recovery decision stream failed")
             yield _sse("error", {"detail": "sprint recovery request failed"})
             return
         final = await graph.aget_state(config)
         _register_if_waiting(request, sprint_id, thread_id, final.values)
-        yield _sse("result", _status_response(thread_id, final.values).model_dump(by_alias=True))
+        await _notify_if_escalated(request, thread_id, sprint_id, final.values)
+        _track_index_lag_if_timed_out(final.values)
+        yield _sse("result", (await _status_response_with_summary(thread_id, final.values, graph)).model_dump(by_alias=True))
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -445,21 +537,77 @@ async def trigger_reevaluation_endpoint(thread_id: str, request: Request) -> Rec
         raise HTTPException(status_code=404, detail=f"no sprint-recovery workflow with thread_id={thread_id}")
     await _authorize_workflow_state(request, snap.values)
     if snap.values.get("status") != "waiting_reevaluation":
-        raise HTTPException(
-            status_code=409,
-            detail=f"sprint-recovery {thread_id} is not waiting on reevaluation (status={snap.values.get('status')})",
-        )
+        # Not an error — a race this workflow is *designed* to have. `kafka_trigger.py` resumes the
+        # exact same pause whenever a relevant `IssueContentChangedEvent` lands, and (found live) the
+        # workflow's own committed actions produce those events: approving a plan writes
+        # change_priority/add_comment to jira-backend, jira-backend publishes, the trigger consumes,
+        # and the pause is already consumed by the time a human clicks "Re-check now" a second later.
+        # Both callers ask the same question — "what's the latest?" — so answering with the current
+        # state is correct; 409-ing surfaced a raw error blob for what is really a completed action.
+        return await _status_response_with_summary(thread_id, snap.values, graph)
     await trigger_reevaluation(graph, thread_id, source="manual")
     final = await graph.aget_state(config)
     _register_if_waiting(request, snap.values["sprint_id"], thread_id, final.values)
     await _notify_if_escalated(request, thread_id, snap.values["sprint_id"], final.values)
+    _track_index_lag_if_timed_out(final.values)
     return await _status_response_with_summary(thread_id, final.values, graph)
+
+
+@router.post("/{thread_id}/trigger-reevaluation/stream")
+async def trigger_reevaluation_stream_endpoint(thread_id: str, request: Request) -> StreamingResponse:
+    """SSE variant of POST /{thread_id}/trigger-reevaluation. `reevaluate_node` itself is fast and
+    deterministic (no LLM call — see `_detect_risk_signals`), but if it decides the sprint is still at
+    risk and under the escalation cap, it routes straight into `plan_node` again in the same call —
+    exactly the case worth a `stage` event for. See `_stream_call`.
+    """
+    graph = _graph(request)
+    config = {"configurable": {"thread_id": thread_id}}
+    snap = await graph.aget_state(config)
+    if not snap.values:
+        raise HTTPException(status_code=404, detail=f"no sprint-recovery workflow with thread_id={thread_id}")
+    await _authorize_workflow_state(request, snap.values)
+    sprint_id = snap.values["sprint_id"]
+
+    if snap.values.get("status") != "waiting_reevaluation":
+        # Same benign race as the non-streaming endpoint above — see its comment. Answered as a
+        # normal `result` frame so the client's stream handler needs no special case for it.
+        already = await _status_response_with_summary(thread_id, snap.values, graph)
+
+        async def already_done() -> AsyncIterator[str]:
+            yield _sse("result", already.model_dump(by_alias=True))
+
+        return StreamingResponse(already_done(), media_type="text/event-stream")
+
+    async def generate() -> AsyncIterator[str]:
+        try:
+            async for event in _stream_call(trigger_reevaluation(graph, thread_id, source="manual")):
+                yield event
+        except Exception as exc:  # noqa: BLE001 - clean SSE error frame, same as ask_stream's backstop
+            yield _sse("error", {"detail": str(exc)})
+            return
+        final = await graph.aget_state(config)
+        _register_if_waiting(request, sprint_id, thread_id, final.values)
+        await _notify_if_escalated(request, thread_id, sprint_id, final.values)
+        _track_index_lag_if_timed_out(final.values)
+        yield _sse("result", (await _status_response_with_summary(thread_id, final.values, graph)).model_dump(by_alias=True))
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 class CheckpointOut(_CamelModel):
     checkpoint_id: str
     next_node: Optional[str]
     status: Optional[str]
+    # When this checkpoint was written. LangGraph records it on every snapshot; without surfacing it
+    # the time-travel picker was an unordered-looking wall of near-identical rows with no way to tell
+    # which step happened first — the single most confusing thing about that panel.
+    created_at: Optional[str] = None
+    # What made THIS checkpoint different from the last one, in the one case where the generic
+    # per-node label can't say — `commit_one_action` runs once per action in a plan, so a 3-action
+    # plan produced 3 identical-looking "Applying changes in Jira…" rows in a row with nothing to
+    # tell them apart. Populated only for those rows; `None` everywhere else means "the label already
+    # says enough."
+    detail: Optional[str] = None
 
 
 @router.get("/{thread_id}/history", response_model=List[CheckpointOut])
@@ -470,15 +618,45 @@ async def recovery_history_endpoint(thread_id: str, request: Request) -> List[Ch
         raise HTTPException(status_code=404, detail=f"no sprint-recovery workflow with thread_id={thread_id}")
     await _authorize_workflow_state(request, snap.values)
     history = await list_checkpoint_history(graph, thread_id)
+    history = [s for s in history if s.values]  # drop the empty pre-START snapshot
+    details = _committing_step_details(history)
     return [
         CheckpointOut(
             checkpoint_id=s.config["configurable"]["checkpoint_id"],
             next_node=s.next[0] if s.next else None,
             status=s.values.get("status"),
+            created_at=getattr(s, "created_at", None),
+            detail=details.get(s.config["configurable"]["checkpoint_id"]),
         )
         for s in history
-        if s.values  # skip the empty pre-START snapshot
     ]
+
+
+def _committing_step_details(history_newest_first: list) -> Dict[str, str]:
+    """Maps each `status="committing"` checkpoint to which specific action it just applied, by diffing
+    `committed_actions` against the immediately-preceding checkpoint in time (history comes in
+    newest-first, so "preceding" is the *next* item in this list). One index appears per step because
+    `commit_one_action_node` commits exactly one action per graph step (see that node's docstring on
+    why — a crash mid-plan must not lose track of which actions already ran); this walk surfaces that
+    one-per-step reality back to the reader instead of leaving every step looking identical.
+    """
+    result: Dict[str, str] = {}
+    for i, snap in enumerate(history_newest_first):
+        if snap.values.get("status") != "committing":
+            continue
+        plan = snap.values.get("approved_plan")
+        if plan is None:
+            continue
+        prev = history_newest_first[i + 1] if i + 1 < len(history_newest_first) else None
+        before = set((prev.values.get("committed_actions") or {}).keys()) if prev else set()
+        after = set((snap.values.get("committed_actions") or {}).keys())
+        newly_committed = after - before
+        if len(newly_committed) != 1:
+            continue  # ambiguous (0 or >1) — leave detail unset rather than guess wrong
+        idx = int(next(iter(newly_committed)))
+        if 0 <= idx < len(plan.actions):
+            result[snap.config["configurable"]["checkpoint_id"]] = _describe_action(plan.actions[idx])
+    return result
 
 
 class TimeTravelRequest(_CamelModel):

@@ -57,6 +57,16 @@ SPRINT_RECOVERY_ESCALATIONS_TOTAL = Counter(
     "Sprint-recovery workflows that exhausted their escalation cap and handed off to a human",
     ["space_id"],
 )
+# Per-request, "might this specific read be stale" is answerable from the response alone (see
+# `RecoveryStatusResponse.index_catch_up_timed_out`). This is the aggregate view an on-call would
+# actually watch: a handful of timeouts is normal jitter (broker GC, a rebalance); a rising rate means
+# the Kafka/vectorization-service pipeline itself is degraded, not that any single check was unlucky —
+# the same "one-off vs trend" distinction `SPRINT_RECOVERY_ESCALATIONS_TOTAL` exists to make visible.
+SPRINT_RECOVERY_INDEX_CATCH_UP_TIMEOUTS_TOTAL = Counter(
+    "sprint_recovery_index_catch_up_timeouts_total",
+    "Reevaluations that gave up waiting for the read model to reflect this workflow's own writes",
+    ["space_id"],
+)
 
 
 def get_request_id() -> str:

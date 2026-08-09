@@ -40,10 +40,13 @@ independent loops instead of one.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 from contextvars import ContextVar
-from typing import Callable, List, Optional
+from datetime import date, datetime, timezone
+from typing import Callable, Dict, List, Optional
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
@@ -81,6 +84,19 @@ _STAGE_LABELS = {
     "plan": "generating recovery plans",
 }
 
+# Plain-English names for `RiskSignal.signal_type`. These reach real users — a risk signal is restated
+# as citable evidence in `diagnose_node`, and that text is rendered verbatim in the UI's evidence
+# panel and citation tooltips. Found live: the raw enum leaked through as
+# "low_completion_forecast: 0/3 issues done" in a user-facing tooltip, which reads as debug output.
+_SIGNAL_LABELS = {
+    "blocked_no_flag": "Marked as blocked",
+    "long_in_progress": "Stuck in progress",
+    "owner_overloaded": "Assignee overloaded",
+    "no_dependency_recorded": "Undocumented dependency",
+    "scope_added_late": "Scope added late in the sprint",
+    "low_completion_forecast": "Behind on completion",
+}
+
 # Same pattern `crag_loop.py`'s `_ground_answer` already uses to recognize an issue key mentioned in
 # free text (e.g. a comment saying "waiting on PAY-97" without PAY-97 itself being independently
 # flagged as at-risk) — reused rather than reinvented, and for the same reason: a hypothesis about an
@@ -97,6 +113,8 @@ from app.sprint_recovery.schemas import (
     RecoveryPlanSet,
     RiskSignal,
     RootCauseHypothesis,
+    SprintIssueSummary,
+    SprintSnapshot,
 )
 from app.sprint_recovery.state import SprintRecoveryState
 
@@ -171,32 +189,368 @@ async def _gather_evidence(
     return evidence
 
 
-async def _detect_risk_signals(retrieval, space_id: int, sprint_id: int) -> List[RiskSignal]:
+_STALE_AFTER_DAYS = 2  # in_progress/blocked with no update for longer than this — see docstring below
+# `owner_overloaded` thresholds. Both are product judgements, not technical facts — teams differ, and
+# both are named constants specifically so that's obvious and tunable.
+#
+# Points-based (used whenever the sprint has any estimated issue): one person carrying this share of
+# the sprint's still-open story points is overloaded, regardless of how many tickets that is — a
+# single 13-point ticket can be a worse bottleneck than five 1-point ones. **Found live, from direct
+# product feedback**: a pure issue-count threshold treats a 1-point ticket and an 8-point ticket as
+# identical load, which doesn't match how sprints are actually sized and committed.
+_OVERLOADED_POINTS_SHARE = 0.4
+# Guards the points rule from firing on a single big ticket that just happens to be the only unfinished
+# work left for anyone — "overloaded" implies competing demands, not "the last person standing."
+_OVERLOADED_MIN_ISSUES = 2
+# Fallback when nothing in the sprint is estimated (a legitimate state — not every team points every
+# ticket), so the signal degrades to something computable rather than going silent.
+_OVERLOADED_OPEN_ISSUES = 3
+# How far into a sprint's elapsed time a "sprint" field-change to THIS sprint counts as scope added
+# "late" rather than normal pre-sprint/early-sprint grooming. 0.5 = added after the sprint's own
+# midpoint. A product judgement, not a technical fact, same as the constants above.
+_SCOPE_ADDED_LATE_ELAPSED_FRAC = 0.5
+
+
+def _days_since(iso_ts: Optional[str]) -> Optional[float]:
+    if not iso_ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - dt).total_seconds() / 86400
+
+
+def _parse_iso_date(iso_ts: Optional[str]) -> Optional[date]:
+    if not iso_ts:
+        return None
+    try:
+        return datetime.fromisoformat(str(iso_ts).replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
+
+
+async def _sprint_context(retrieval, space_id: int, sprint_id: int) -> dict:
+    """Best-effort lookup of one sprint's own record: start/end dates for the timeline-aware
+    completion checks, and the sprint GOAL. `query_sprints` has no `sprint_ids` filter (it wasn't
+    needed anywhere else), so this fetches the space's sprints and picks the matching one; returns
+    empty values (never raises) on anything unexpected — every consumer below degrades to a
+    date/goal-independent rule, this must not be able to break diagnosis outright.
+
+    **The goal was being thrown away entirely.** `RecoveryPlan` has always had an `impact_on_goal`
+    field, and the plan prompt has always asked the model to fill it in — while never once showing it
+    what the goal actually says. So "impact on goal" was the model inferring a plausible-sounding goal
+    from ticket titles. A sprint goal is the single most important piece of context a PM applies when
+    judging sprint risk ("will we hit the commitment?" is a different question from "will every ticket
+    close?"), and it was sitting unused in the sprints table the whole time.
+    """
+    try:
+        result = await retrieval.query_sprints([space_id], {"limit": 200})
+        for sprint in result.sprints:
+            if sprint.get("sprint_id") == sprint_id:
+                # Over the wire these are JSON strings (e.g. "2026-08-14"), not `date` objects — the
+                # real RetrievalClient hands back raw `resp.json()` dicts with no date deserialization.
+                return {
+                    "start_date": date.fromisoformat(str(sprint["start_date"])[:10]) if sprint.get("start_date") else None,
+                    "end_date": date.fromisoformat(str(sprint["end_date"])[:10]) if sprint.get("end_date") else None,
+                    "goal": sprint.get("goal"),
+                    "sprint_name": sprint.get("sprint_name"),
+                }
+    except Exception:  # noqa: BLE001 - supplementary context, not load-bearing
+        return {}
+    return {}
+
+
+# How long `_await_index_catch_up` will keep waiting for the read model before giving up and reading
+# anyway. A ceiling on a condition that is normally satisfied on the first poll — not a guessed delay.
+_INDEX_CATCH_UP_TIMEOUT_SECONDS = 10.0
+_INDEX_CATCH_UP_POLL_SECONDS = 0.25
+
+
+def _parse_ts(value) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+async def _await_index_catch_up(retrieval, space_id: int, sprint_id: int, watermarks: Dict[str, str]) -> bool:
+    """Blocks until vectorization-service's index reflects the writes this workflow just made, or the
+    timeout expires. Returns True if it actually caught up.
+
+    **Why this exists.** jira-backend writes synchronously, publishes to Kafka, and
+    vectorization-service reindexes asynchronously on its own consumer group — so *every* path that
+    resumes this workflow can observe a stale sprint. That includes the real Kafka trigger:
+    `kafka_trigger.py` is a **separate consumer group** from vectorization-service's, so both receive
+    the same event at the same time and the trigger can easily win the race to read an index that
+    hasn't been rebuilt yet. An earlier version of this fix slept a flat 2 seconds in one HTTP route,
+    which (a) only covered one of the three trigger paths, and (b) was a guess that a slow broker or a
+    consumer-group rebalance would beat anyway.
+
+    **The actual signal.** `commit_one_action_node` records, per issue it wrote to, that issue's
+    `updatedAt` read back from jira-backend — the write-side source of truth. This polls the same
+    `query_issues` call `_detect_risk_signals` uses and waits until every one of those issues either
+    reports an indexed `updated_at` at least as new as the recorded watermark, or has left this sprint
+    entirely (which is exactly what a committed `move_out_of_sprint` looks like once it lands, and is
+    equally proof the write propagated). No watermarks (nothing was committed) means nothing to wait for.
+
+    **The honest bound.** On timeout this returns False and the caller reads anyway rather than
+    stalling the workflow — a stale read is still possible, but it now requires the index to be more
+    than `_INDEX_CATCH_UP_TIMEOUT_SECONDS` behind, instead of merely being slower than a fixed guess.
+    """
+    if not watermarks:
+        return True
+    deadline = time.monotonic() + _INDEX_CATCH_UP_TIMEOUT_SECONDS
+    while True:
+        result = await retrieval.query_issues([space_id], {"sprint_ids": [sprint_id], "limit": 200})
+        indexed = {row["issue_key"]: row.get("updated_at") for row in result.issues}
+        if all(
+            key not in indexed or _is_at_least(_parse_ts(indexed.get(key)), _parse_ts(expected))
+            for key, expected in watermarks.items()
+        ):
+            return True
+        if time.monotonic() >= deadline:
+            logger.warning(
+                "sprint-recovery read model did not catch up before the timeout; reading anyway",
+                extra={"space_id": space_id, "sprint_id": sprint_id, "watermarks": watermarks},
+            )
+            return False
+        await asyncio.sleep(_INDEX_CATCH_UP_POLL_SECONDS)
+
+
+def _is_at_least(indexed: Optional[datetime], expected: Optional[datetime]) -> bool:
+    """An unparseable/missing timestamp on either side can't prove staleness — treat it as satisfied
+    rather than blocking the workflow on a comparison that will never succeed."""
+    if indexed is None or expected is None:
+        return True
+    return indexed >= expected
+
+
+def _last_update_not_by_this_workflow(issue: dict, own_writes: Optional[Dict[str, tuple]]) -> Optional[str]:
+    """The issue's `updated_at`, except when the most recent update was *this workflow's own* — in
+    which case the honest answer to "when did somebody last move this along" is the timestamp from
+    before we touched it.
+
+    **Found live, and it produced a false `recovered`**: jira-backend stamps `updatedAt = now()` on
+    every issue write (`@PreUpdate` on the `Issue` entity), so committing a `change_priority` on a
+    ticket that had been untouched for six days made it look updated-just-now. `long_in_progress` and
+    `blocked_no_flag` both gate on `_days_since(updated_at)`, so both signals silently vanished, and a
+    sprint where two tickets were still sitting in `in_progress` with zero real progress reported
+    `status="recovered"` on the very next reevaluation. The workflow was declaring victory by touching
+    the ticket. (Reproduced deterministically: 86%-complete sprint, two 6-day-stale in_progress
+    tickets, priority bump only → `recovered`, zero signals.)
+
+    `own_writes` maps issue_key -> (before, after) `updatedAt` values recorded by
+    `commit_one_action_node`. If the indexed timestamp is newer than our own write, a *human* has
+    since touched the issue and that is genuinely the freshest signal — use it. Otherwise the last
+    writer was us, so fall back to the pre-write baseline.
+    """
+    indexed = issue.get("updated_at")
+    if not own_writes:
+        return indexed
+    entry = own_writes.get(issue.get("issue_key"))
+    if not entry:
+        return indexed
+    before, after = entry
+    if not before:
+        return indexed
+    indexed_ts, after_ts = _parse_ts(indexed), _parse_ts(after)
+    if indexed_ts is not None and after_ts is not None and indexed_ts > after_ts:
+        return indexed  # somebody real updated it after we did
+    return before
+
+
+async def _detect_risk_signals(
+    retrieval, space_id: int, sprint_id: int, own_writes: Optional[Dict[str, tuple]] = None,
+) -> List[RiskSignal]:
     """Deterministic — code computes this, never the LLM (same "code computes, LLM explains" split
-    `app/sprint_health/service.py` and `app/planning/graph.py`'s critic already use). Two signals,
-    chosen because both are directly computable from `query_issues`'s existing fields without
+    `app/sprint_health/service.py` and `app/planning/graph.py`'s critic already use). Chosen because
+    all are directly computable from `query_issues`/`query_sprints`'s existing fields without
     inventing data this project doesn't have (e.g. no assignee-workload signal — `IssueRowOut` carries
     no assignee field, so that signal type stays in the schema as an LLM-inferable-from-evidence
     category rather than a fabricated deterministic one).
+
+    **Two refinements found live, from direct product feedback, not hypothetically:**
+
+    1. `long_in_progress`/`blocked_no_flag` used to fire on ANY issue in that status, with no regard
+       for how long it had sat there or whether anyone had touched it recently — a ticket that moved to
+       in_progress five minutes ago looked exactly as risky as one untouched for two weeks. This is
+       also the deterministic answer to "can the system tell if an owner just isn't updating their
+       ticket": yes — `_days_since(updated_at)` is exactly that check, now gating both signals.
+    2. `low_completion_forecast` used a single flat 70% cutoff regardless of where the sprint actually
+       stood in its own timeline — 80% done reads very differently on day 2 of a 10-day sprint (way
+       ahead) than with 1 day left (likely to miss). Rather than model full velocity/burndown math
+       (a much bigger, separately-justified feature), this adds two explicit, human-auditable rules
+       alongside the flat one: inside the sprint's final 2 days, the bar rises to 90%; inside its first
+       20% of elapsed time, the flat check is suppressed entirely. That second half **matters for when
+       this tool actually gets run**: a sprint's own completion forecast starts at 0% by definition on
+       day 1 — without this, running a health check on day 1 would flag "low completion" every single
+       time, which is not a finding, it's the sprint just having started. In practice this is a
+       mid-sprint-or-later check, and this rule is what makes that assumption safe to run early too,
+       instead of quietly relying on nobody clicking the button too soon.
+
+    A fourth signal, `scope_added_late`, is genuinely the most consequential in real agile practice —
+    scope added mid-sprint is the classic way a sprint quietly stops being the thing the team
+    committed to. It was left un-implemented until now for the same reason the timeline thresholds
+    above are named constants: "how late is late" is a product judgement, not a technical fact. Having
+    made that call (`_SCOPE_ADDED_LATE_ELAPSED_FRAC`), it's implemented below the same way as the
+    other three: computed from real history, never asserted by the model.
     """
     result = await retrieval.query_issues([space_id], {"sprint_ids": [sprint_id], "limit": 200})
+    sprint_ctx = await _sprint_context(retrieval, space_id, sprint_id)
     signals: List[RiskSignal] = []
+    # issue_key -> owner name, so `_gather_evidence` and the prompts downstream can name a human
+    # instead of asking one to identify themselves. Empty when a ticket is genuinely unassigned —
+    # which is itself worth saying out loud rather than silently omitting.
+    unfinished_by_owner: Dict[str, List[str]] = {}
+    unfinished_points_by_owner: Dict[str, int] = {}
+    total_unfinished_points = 0
+
     for issue in result.issues:
         status = (issue.get("status") or "").lower()
-        if status in ("in_progress", "in progress") and issue.get("updated_at"):
+        owner = issue.get("assignee_name")
+        owner_note = f" Owner: {owner}." if owner else " No one is assigned to it."
+        if status not in ("done", "completed"):
+            points = issue.get("story_points") or 0
+            total_unfinished_points += points
+            if owner:
+                unfinished_by_owner.setdefault(owner, []).append(issue["issue_key"])
+                unfinished_points_by_owner[owner] = unfinished_points_by_owner.get(owner, 0) + points
+
+        days_stale = _days_since(_last_update_not_by_this_workflow(issue, own_writes))
+        if days_stale is None or days_stale < _STALE_AFTER_DAYS:
+            continue  # too fresh to call a problem yet, regardless of status
+        if status in ("in_progress", "in progress"):
             signals.append(RiskSignal(
                 issue_key=issue["issue_key"], signal_type="long_in_progress",
-                description=f"{issue['issue_key']} has been in_progress, last updated {issue['updated_at']}.",
+                description=(
+                    f"{issue['issue_key']} has been in_progress for {days_stale:.0f} day(s) with no "
+                    f"update — the owner may not be reporting status.{owner_note}"
+                ),
             ))
+        elif status == "blocked":
+            # **Found live**: `blocked` is a first-class status in the board's own type system
+            # (sprint-orchestra-studio/src/types/ticket.ts), and `RiskSignal.signal_type` already
+            # named `blocked_no_flag` in its schema — but nothing ever set it, so a genuinely blocked
+            # issue tripped no per-issue signal at all.
+            signals.append(RiskSignal(
+                issue_key=issue["issue_key"], signal_type="blocked_no_flag",
+                description=(
+                    f"{issue['issue_key']} has been blocked for {days_stale:.0f} day(s) with no "
+                    f"update.{owner_note}"
+                ),
+            ))
+
+    # `owner_overloaded` has been declared in `RiskSignal.signal_type` since the schema was written
+    # but was impossible to compute — `IssueRowOut` carried no assignee field until migrations/012.
+    # One person holding most of a sprint's open work is a genuine, common delivery risk (and the one
+    # a standup would catch first), so with the data finally available it's worth detecting: the
+    # actionable form is naming who, not just noting that the sprint is behind.
+    use_points = total_unfinished_points > 0
+    for owner, keys in sorted(unfinished_by_owner.items()):
+        overloaded = False
+        detail = ""
+        if use_points:
+            share = unfinished_points_by_owner[owner] / total_unfinished_points
+            if share >= _OVERLOADED_POINTS_SHARE and len(keys) >= _OVERLOADED_MIN_ISSUES:
+                overloaded = True
+                detail = (
+                    f"{owner} is carrying {unfinished_points_by_owner[owner]}/{total_unfinished_points} "
+                    f"story points ({share:.0%}) of this sprint's unfinished work, across "
+                    f"{len(keys)} issues ({', '.join(sorted(keys))}) — more than one person can "
+                    "realistically land."
+                )
+        elif len(keys) >= _OVERLOADED_OPEN_ISSUES:
+            overloaded = True
+            detail = (
+                f"{owner} is carrying {len(keys)} unfinished issues in this sprint "
+                f"({', '.join(sorted(keys))}, no story points estimated) — more than one person can "
+                "realistically land."
+            )
+        if overloaded:
+            signals.append(RiskSignal(
+                # Attributed to the owner's first ticket so plan_node has a concrete, actionable
+                # target — a signal with no issue_key can't be acted on (see plan_node's handoff branch).
+                issue_key=sorted(keys)[0], signal_type="owner_overloaded", description=detail,
+            ))
+
+    start_date, end_date = sprint_ctx.get("start_date"), sprint_ctx.get("end_date")
+
     total = result.total_count
     done = result.counts_by_status.get("done", 0) + result.counts_by_status.get("completed", 0)
     if total > 0:
-        forecast = round(100 * done / total, 1)
-        if forecast < 70:
+        # Points, not just issue count. Real sprints are committed and tracked in story points; by
+        # count alone, 8 trivial tickets done out of 10 reads as "80% complete" even when the two
+        # left carry most of the sprint's weight. Falls back to count when nothing is estimated,
+        # which is a legitimate state (`sprints.unestimated_issue_count` tracks it at sprint level).
+        total_points = sum(i.get("story_points") or 0 for i in result.issues)
+        done_points = sum(
+            i.get("story_points") or 0 for i in result.issues
+            if (i.get("status") or "").lower() in ("done", "completed")
+        )
+        if total_points > 0:
+            forecast = round(100 * done_points / total_points, 1)
+            basis = f"{done_points}/{total_points} story points done ({forecast}%)"
+        else:
+            forecast = round(100 * done / total, 1)
+            basis = f"{done}/{total} issues done ({forecast}%, no story points estimated)"
+
+        days_left = (end_date - date.today()).days if end_date else None
+        duration_days = (end_date - start_date).days if start_date and end_date else None
+        elapsed_frac = (
+            max(0.0, min(1.0, (date.today() - start_date).days / duration_days))
+            if duration_days else None
+        )
+        too_early = elapsed_frac is not None and elapsed_frac < 0.2
+        near_deadline_and_short = days_left is not None and days_left <= 2 and forecast < 90
+        if not too_early and (forecast < 70 or near_deadline_and_short):
+            deadline_note = f" — only {max(days_left, 0)} day(s) left in the sprint" if near_deadline_and_short else ""
             signals.append(RiskSignal(
                 signal_type="low_completion_forecast",
-                description=f"{done}/{total} issues done ({forecast}%) — below the 70% checkpoint.",
+                description=f"{basis}{deadline_note} — below the checkpoint for this stage of the sprint.",
             ))
+
+    # scope_added_late: an issue whose "sprint" field changed TO this sprint after the sprint was
+    # already well underway. Real example this catches: a sprint starts with 10 committed tickets: on
+    # day 7 of a 10-day sprint someone drags in 2 "quick" extra tickets during grooming. Every other
+    # signal here reads that as the team's own fault (falling completion %, an overloaded assignee) —
+    # none of them can say the actual cause was scope moving, not the team executing worse. This is
+    # the one deterministic fact that names that specific cause. See this function's own docstring for
+    # why "how late is late" (`_SCOPE_ADDED_LATE_ELAPSED_FRAC`) is a named, tunable judgement call.
+    sprint_name = sprint_ctx.get("sprint_name")
+    duration_days = (end_date - start_date).days if start_date and end_date else None
+    if duration_days and sprint_name and result.issues:
+        try:
+            history = await retrieval.query_issue_history(
+                [space_id], {"issue_keys": [i["issue_key"] for i in result.issues], "fields": ["sprint"], "limit": 200},
+            )
+            latest_add_by_issue: Dict[str, date] = {}
+            for change in history.changes:
+                if change.get("to_value") != sprint_name:
+                    continue
+                changed_at = _parse_iso_date(change.get("changed_at"))
+                if changed_at is None:
+                    continue
+                issue_key = change.get("issue_key")
+                if issue_key and (issue_key not in latest_add_by_issue or changed_at > latest_add_by_issue[issue_key]):
+                    latest_add_by_issue[issue_key] = changed_at
+            for issue_key, added_on in sorted(latest_add_by_issue.items()):
+                elapsed_at_add = max(0.0, min(1.0, (added_on - start_date).days / duration_days))
+                if elapsed_at_add >= _SCOPE_ADDED_LATE_ELAPSED_FRAC:
+                    signals.append(RiskSignal(
+                        issue_key=issue_key, signal_type="scope_added_late",
+                        description=(
+                            f"{issue_key} was added to {sprint_name} on {added_on.isoformat()}, "
+                            f"{elapsed_at_add:.0%} of the way through the sprint — scope added this "
+                            "late is a common reason a sprint misses its goal independent of how the "
+                            "originally committed work is going."
+                        ),
+                    ))
+        except Exception:  # noqa: BLE001 - supplementary signal, must not break diagnosis outright
+            pass
+
     return signals
 
 
@@ -221,13 +575,83 @@ def _apply_grounding(hypotheses: List[RootCauseHypothesis], evidence: List[Evide
     return kept
 
 
+async def _build_sprint_snapshot(retrieval, space_id: int, sprint_id: int) -> SprintSnapshot:
+    """The sprint's whole shape — goal, timeline position, and every issue in it.
+
+    **Found live**: `_detect_risk_signals` already fetches exactly this data, then returns only the
+    signals it derived and discards the rest. That single omission is why a sprint-level problem had
+    no ticket to act on: `plan_node` builds `known_issue_keys` purely from signals/evidence, so an
+    issue that never independently tripped a per-issue signal was invisible to planning even though
+    the system had just read it. Keeping the snapshot is what makes a *strategic* option ("move the
+    two lowest-priority tickets out") expressible at all.
+
+    Costs one extra structured query per diagnosis (plain SQL over the issues table, not an LLM call)
+    rather than changing `_detect_risk_signals`'s return type, which every caller and a dozen tests
+    depend on.
+    """
+    result = await retrieval.query_issues([space_id], {"sprint_ids": [sprint_id], "limit": 200})
+    ctx = await _sprint_context(retrieval, space_id, sprint_id)
+    start_date, end_date = ctx.get("start_date"), ctx.get("end_date")
+    duration = (end_date - start_date).days if start_date and end_date else None
+    return SprintSnapshot(
+        sprint_name=ctx.get("sprint_name"),
+        goal=ctx.get("goal"),
+        days_remaining=(end_date - date.today()).days if end_date else None,
+        elapsed_percent=(
+            int(round(100 * max(0.0, min(1.0, (date.today() - start_date).days / duration))))
+            if duration else None
+        ),
+        issues=[
+            SprintIssueSummary(
+                issue_key=i["issue_key"], title=i.get("title"), status=i.get("status"),
+                priority=i.get("priority"), assignee_name=i.get("assignee_name"),
+                story_points=i.get("story_points"),
+            )
+            for i in result.issues
+        ],
+    )
+
+
 async def diagnose_node(state: SprintRecoveryState, client, model: str, retrieval) -> dict:
     if not _check_budget(state):
         return {"status": "failed", "error": "token budget exhausted before diagnosis could complete"}
 
     signals = await _detect_risk_signals(retrieval, state["space_id"], state["sprint_id"])
+
+    # A sprint with zero deterministic risk signals is simply healthy — say so and stop, without
+    # spending an LLM call. **Found live**: without this short-circuit, such a sprint still went to the
+    # model with an empty signals+evidence prompt, which then (reasonably, given nothing to work with)
+    # returned overall_confidence="insufficient" and asked the *human* a question like "what risk
+    # signals or evidence were gathered for this sprint?" — the model asking the user to supply the
+    # very data the system is supposed to gather for itself. That is nonsense from a user's point of
+    # view, and it fired on all 7 real AtlasCart sprints (100% of them), making the confidence gate
+    # look like the normal path when it should be the exception.
+    if not signals:
+        return {
+            "status": "no_risk_found", "risk_signals": [], "evidence": [], "hypotheses": [],
+            "clarification_question": None,
+        }
+
     flagged_keys = sorted({s.issue_key for s in signals if s.issue_key})
     evidence = await _gather_evidence(retrieval, state["space_id"], state["sprint_id"], flagged_keys)
+
+    # Restate every deterministic signal as citable evidence. These are the most reliable facts in the
+    # whole run (computed by code, never inferred), yet the original prompt showed them in a separate
+    # "risk signals" block the model was structurally forbidden to cite — `_apply_grounding` only
+    # accepts ids that exist in `evidence`. **Found live**: a sprint whose only signal was sprint-level
+    # (`low_completion_forecast` carries no issue_key, so `_gather_evidence` fetched nothing at all)
+    # gave the model facts it could not legally reference; every hypothesis it produced was then
+    # dropped for citing an unknown id, leaving zero hypotheses and, one node later, a bare
+    # "every proposed plan cited only invalid/unknown issue keys" failure with no explanation.
+    signal_evidence = [
+        EvidenceItem(
+            citation_id=f"risk{i}", issue_key=s.issue_key or "", source_type="risk_signal",
+            content=f"{_SIGNAL_LABELS.get(s.signal_type, s.signal_type)}: {s.description}",
+        )
+        for i, s in enumerate(signals, start=1)
+    ]
+    evidence = signal_evidence + evidence
+
     if state["clarification_answer"]:
         evidence = evidence + [EvidenceItem(
             citation_id=f"human-clarification-{state['clarification_rounds']}",
@@ -236,12 +660,22 @@ async def diagnose_node(state: SprintRecoveryState, client, model: str, retrieva
 
     evidence_text = "\n".join(f"[{e.citation_id}] ({e.issue_key} / {e.source_type}) {e.content}" for e in evidence)
     signals_text = "\n".join(f"- {s.signal_type}: {s.description}" for s in signals)
+    # The sprint's own committed goal. "Will we hit the commitment?" is a different question from
+    # "will every ticket close?", and it's the one a PM actually asks — see `_sprint_context`.
+    sprint_goal = (await _sprint_context(retrieval, state["space_id"], state["sprint_id"])).get("goal")
+    goal_text = f"Sprint goal (what this sprint committed to deliver): {sprint_goal}\n" if sprint_goal else ""
     prompt = (
-        f"Sprint: {state['sprint_name']}\n\nDeterministic risk signals:\n{signals_text}\n\n"
+        f"Sprint: {state['sprint_name']}\n{goal_text}\nDeterministic risk signals:\n{signals_text}\n\n"
         f"Evidence gathered (cite by id, never invent an id):\n{evidence_text}\n\n"
-        "Propose root-cause hypotheses for why this sprint may be at risk. Every hypothesis must cite "
-        "at least one real evidence id above. Set overall_confidence='insufficient' only if there is a "
-        "genuine, specific gap a human could fill — not as a default hedge."
+        "Propose root-cause hypotheses for why this sprint may be at risk. Judge risk against the "
+        "sprint goal above where one is given — a sprint can miss individual tickets and still hit "
+        "its goal, or close most tickets and still miss it. Every hypothesis must cite "
+        "at least one real evidence id above. Within `statement` itself, write the evidence id in "
+        "square brackets — e.g. [ev1] or [risk2] — directly after the specific clause it supports, not "
+        "bundled at the end of the sentence; a reader should be able to tell which fact backs which "
+        "claim. Every bracketed id in `statement` must also appear in `supporting_evidence_ids`, and "
+        "vice versa — the two must match exactly. Set overall_confidence='insufficient' only if there "
+        "is a genuine, specific gap a human could fill — not as a default hedge."
     )
     result: DiagnosisResult = await client.chat.completions.create(
         model=model, response_model=DiagnosisResult, max_retries=2,
@@ -250,6 +684,9 @@ async def diagnose_node(state: SprintRecoveryState, client, model: str, retrieva
     grounded = _apply_grounding(result.hypotheses, evidence)
     update = {
         "risk_signals": signals, "evidence": evidence, "hypotheses": grounded,
+        # Carried forward, not discarded — see `_build_sprint_snapshot`. This is what lets `plan_node`
+        # reason about issues that never tripped a per-issue signal of their own.
+        "sprint_snapshot": await _build_sprint_snapshot(retrieval, state["space_id"], state["sprint_id"]),
         "token_usage": state["token_usage"] + _TOKENS_PER_LLM_CALL_ESTIMATE,
     }
     if result.overall_confidence == "insufficient" and state["clarification_rounds"] < state["max_clarification_rounds"]:
@@ -262,7 +699,7 @@ async def diagnose_node(state: SprintRecoveryState, client, model: str, retrieva
 
 
 def _after_diagnose(state: SprintRecoveryState) -> str:
-    if state["status"] == "failed":
+    if state["status"] in ("failed", "no_risk_found"):
         return END
     if state["clarification_question"] and state["clarification_rounds"] < state["max_clarification_rounds"]:
         return "clarify"
@@ -282,7 +719,32 @@ async def clarify_node(state: SprintRecoveryState) -> dict:
     }
 
 
-async def plan_node(state: SprintRecoveryState, client, model: str) -> dict:
+def _render_snapshot(snapshot: Optional[SprintSnapshot]) -> str:
+    """The sprint's roster as prompt text. Deliberately includes every issue with its status, owner,
+    points and priority — a strategic option ("protect the goal, drop the rest") can only be proposed
+    by something that can see what "the rest" actually is.
+    """
+    if snapshot is None or not snapshot.issues:
+        return ""
+    lines = [
+        f"- {i.issue_key} [{i.status or 'unknown status'}] "
+        f"{'(' + str(i.story_points) + ' pts) ' if i.story_points is not None else ''}"
+        f"{'priority=' + i.priority + ' ' if i.priority else ''}"
+        f"{'owner=' + i.assignee_name + ' ' if i.assignee_name else 'unassigned '}"
+        f"— {i.title or ''}".rstrip()
+        for i in snapshot.issues
+    ]
+    header = "Every issue in this sprint right now:"
+    timing = []
+    if snapshot.elapsed_percent is not None:
+        timing.append(f"{snapshot.elapsed_percent}% of the sprint has elapsed")
+    if snapshot.days_remaining is not None:
+        timing.append(f"{snapshot.days_remaining} day(s) remain")
+    timing_text = f"({', '.join(timing)})\n" if timing else ""
+    return f"\n{timing_text}{header}\n" + "\n".join(lines) + "\n"
+
+
+async def plan_node(state: SprintRecoveryState, client, model: str, retrieval) -> dict:
     """**Found live, not hypothetically**: the first end-to-end run against real AtlasCart data
     produced actions with `target_issue_key` values like `"ev15"`, `"ev3"` — the model had confused
     `EvidenceItem.citation_id` (only ever meaningful for `RootCauseHypothesis.supporting_evidence_ids`)
@@ -295,17 +757,44 @@ async def plan_node(state: SprintRecoveryState, client, model: str) -> dict:
     """
     if not _check_budget(state):
         return {"status": "failed", "error": "token budget exhausted before plan generation could complete"}
-    known_issue_keys = sorted(
+    snapshot = state.get("sprint_snapshot")
+    flagged_issue_keys = sorted(
         {e.issue_key for e in state["evidence"] if e.issue_key}
         | {s.issue_key for s in state["risk_signals"] if s.issue_key}
         | {k.upper() for e in state["evidence"] for k in _ISSUE_KEY_RE.findall(e.content)}
     )
-    hyps_text = "\n".join(f"- ({h.confidence}) {h.statement} [cites: {', '.join(h.supporting_evidence_ids)}]" for h in state["hypotheses"])
+    # Every action type this workflow can execute targets a specific issue, so `known_issue_keys` is
+    # what bounds what a plan may legally act on. It used to be *only* the flagged set above — which
+    # meant an issue the system had already read but which hadn't independently tripped a signal was
+    # invisible to planning. The snapshot widens this to the whole sprint (see `_build_sprint_snapshot`):
+    # a strategic direction like "move the two lowest-priority tickets out" inherently acts on issues
+    # that are not themselves the thing that went wrong.
+    known_issue_keys = sorted(set(flagged_issue_keys) | {i.issue_key for i in (snapshot.issues if snapshot else [])})
+
+    # No specific issue tripped a signal, but the sprint is at risk anyway (e.g. `low_completion_forecast`
+    # alone, which carries no issue_key). The sprint roster above is what keeps this plannable rather
+    # than a dead end: a plan can act on any issue in the sprint, not only ones that independently
+    # tripped a signal, so "move the two lowest-priority tickets out" is expressible even though no
+    # single ticket is "broken."
+    if not known_issue_keys:
+        # Nothing at all to reason about — not even a sprint roster. Genuinely nothing to offer.
+        return {
+            "status": "escalated",
+            "error": "Risk was detected at the sprint level, but it isn't tied to any specific issue "
+                     "this workflow can act on — a human needs to decide what to do.",
+        }
+    hyps_text ="\n".join(f"- ({h.confidence}) {h.statement} [cites: {', '.join(h.supporting_evidence_ids)}]" for h in state["hypotheses"])
     prior_note = ""
     if state["escalation_round"] > 0:
+        prior_actions = state.get("prior_committed_actions") or []
+        done_text = "\n".join(f"  - {a}" for a in prior_actions) or "  (nothing recorded)"
         prior_note = (
-            f"\n\nThis is escalation round {state['escalation_round']}: the previously approved plan "
-            "did not resolve the risk. Propose different or adjusted plans, not a repeat."
+            f"\n\nThis is escalation round {state['escalation_round']}: the risk is still present after "
+            f"{len(prior_actions)} action(s) already committed in earlier rounds, listed below. Do not "
+            "repeat any of these — in particular, do not raise a priority that a prior action already "
+            "raised (it has no further effect once at the ceiling), and do not re-comment the same "
+            "request already made. Propose genuinely different actions, or escalate visibility/ownership "
+            "in a way the list below hasn't already tried:\n" + done_text
         )
     if state.get("human_plan_feedback"):
         prior_note += (
@@ -313,8 +802,15 @@ async def plan_node(state: SprintRecoveryState, client, model: str) -> dict:
             f"\"{state['human_plan_feedback']}\". Address this feedback directly in the new plans — do "
             "not repeat what was rejected."
         )
+    # `RecoveryPlan.impact_on_goal` has always been a required field of the schema, and this prompt has
+    # always asked the model to fill it in — while never once showing it what the goal actually says.
+    # "Impact on goal" was therefore the model inferring a plausible goal from ticket titles. Showing
+    # the real one makes that field mean what it claims to.
+    sprint_goal = (await _sprint_context(retrieval, state["space_id"], state["sprint_id"])).get("goal")
+    goal_text = f"Sprint goal (judge every plan's impact_on_goal against THIS): {sprint_goal}\n" if sprint_goal else ""
     prompt = (
-        f"Sprint: {state['sprint_name']}\nRoot-cause hypotheses (the bracketed [cites: ...] ids are "
+        f"Sprint: {state['sprint_name']}\n{goal_text}{_render_snapshot(snapshot)}"
+        f"\nRoot-cause hypotheses (the bracketed [cites: ...] ids are "
         f"internal evidence references, NEVER usable as target_issue_key):\n{hyps_text}{prior_note}\n\n"
         f"Real issue keys this plan may act on — target_issue_key/depends_on_issue_key MUST be one of "
         f"exactly these, verbatim, never an evidence citation id and never invented:\n"
@@ -323,7 +819,17 @@ async def plan_node(state: SprintRecoveryState, client, model: str) -> dict:
         "actually exist for this situation. Do not pad the count to reach 2 or 3 with a weak or "
         "redundant option; if there is really only one sensible approach, propose just that one. "
         "Every action must use one of these action_types: "
-        "link_dependency, change_priority, move_out_of_sprint, add_comment. If a hypothesis itself "
+        "link_dependency, change_priority, move_out_of_sprint, add_comment. When the evidence names "
+        "an issue's owner, address that person by name at the start of any add_comment aimed at them "
+        "(e.g. 'Maya Chen — this has been blocked for 5 days...') and ask them for the specific thing "
+        "only they can supply. Never ask a comment's reader to identify the owner when the evidence "
+        "already states who it is. If the evidence explains an issue's lack of progress by an external "
+        "blocker outside that owner's control (e.g. the team was diverted to a production incident, "
+        "waiting on another team, or blocked by a dependency), any comment addressed to that owner "
+        "must acknowledge the blocker directly and ask about ITS status (e.g. 'is the incident "
+        "resolved yet, when can you get back to this') — do not ask them to simply confirm they've "
+        "resumed the original work or commit to a completion date as if the blocker no longer applies; "
+        "that contradicts the evidence the plan itself is built on. If a hypothesis itself "
         "concludes the signal is a false positive, already resolved, or that evidence explicitly asks "
         "not to escalate/pull the issue, every proposed plan must respect that: prefer a conservative "
         "action (e.g. add_comment to confirm/close the loop) and do not offer move_out_of_sprint or a "
@@ -372,7 +878,7 @@ def _validate_plan_issue_keys(plans: List[RecoveryPlan], known_issue_keys: List[
 
 
 def _after_plan(state: SprintRecoveryState) -> str:
-    return END if state["status"] == "failed" else "approval"
+    return END if state["status"] in ("failed", "escalated") else "approval"
 
 
 async def approval_node(state: SprintRecoveryState, space_membership: SpaceMembershipChecker) -> dict:
@@ -423,7 +929,10 @@ async def approval_node(state: SprintRecoveryState, space_membership: SpaceMembe
             actions=[RecoveryAction.model_validate(a) for a in payload["actions"]],
         )
 
-    return {"decision": decision or "approve", "approved_plan": chosen, "status": "committing", "committed_actions": {}}
+    return {
+        "decision": decision or "approve", "approved_plan": chosen, "status": "committing",
+        "committed_actions": {}, "index_watermarks": {},
+    }
 
 
 def _after_approval(state: SprintRecoveryState) -> str:
@@ -445,15 +954,59 @@ async def commit_one_action_node(state: SprintRecoveryState, jira: JiraActionsCl
         return {"status": "waiting_reevaluation"}
 
     idx, action = remaining[0]
+    # space_id + sprint_id + escalation_round + plan_revision_round + action index is unique per action
+    # within this sprint's active recovery lifecycle without needing thread_id (which lives in LangGraph's
+    # RunnableConfig, not state — see `_traced`'s own comment on why it's kept out of the state dict). Not
+    # unique across two threads racing the *same* sprint at the *same* round simultaneously, but nothing in
+    # this workflow supports starting two concurrent recovery threads for one sprint today anyway.
+    idempotency_key = (
+        f"sprint-recovery:{state['space_id']}:{state['sprint_id']}:"
+        f"{state['escalation_round']}:{state['plan_revision_round']}:{idx}"
+    )
+    # Captured *before* the write: jira-backend stamps `updatedAt = now()` on any issue update, which
+    # would otherwise make this workflow's own action look like somebody making progress on a stalled
+    # ticket. See `_last_update_not_by_this_workflow` for the false-`recovered` this prevents. First
+    # write wins — if a later round touches the same issue again, the original human baseline is the
+    # one that matters, not a timestamp this workflow itself produced in an earlier round.
+    pre_writes = dict(state.get("pre_write_updated_at") or {})
+    if action.target_issue_key not in pre_writes:
+        before = await jira.issue_updated_at(
+            state["space_id"], action.target_issue_key, state["user_id"], state["username"],
+        )
+        if before:
+            pre_writes[action.target_issue_key] = before
+
     try:
-        result_summary = await jira.execute(state["space_id"], action, state["user_id"], state["username"])
+        result_summary = await jira.execute(
+            state["space_id"], action, state["user_id"], state["username"], idempotency_key=idempotency_key,
+        )
     except JiraActionError as exc:
-        return {"status": "failed", "error": str(exc)}
+        # **Found live in review, not by a failing test**: this used to return without `pre_writes`,
+        # discarding the baseline just captured above. Harmless-looking on a clean failure (the write
+        # never happened, so re-reading the baseline on retry gets the same answer) — but on the exact
+        # case the idempotency key above exists for (the write actually succeeded server-side, the
+        # client only saw a timeout), a retry's baseline GET would run *after* that write already
+        # landed, silently reintroducing the same false-`recovered` bug through the retry path instead
+        # of the happy path. Persisting the pre-write baseline here, captured before this attempt ever
+        # touched Jira, closes that regardless of which way the retry's own GET would have gone.
+        return {"status": "failed", "error": str(exc), "pre_write_updated_at": pre_writes}
 
     committed = dict(state["committed_actions"])
     committed[str(idx)] = result_summary
     done = len(committed) == len(plan.actions)
-    return {"committed_actions": committed, "status": "waiting_reevaluation" if done else "committing"}
+    # Read the issue's own `updatedAt` back from jira-backend (write-side source of truth) so
+    # `reevaluate_node` can wait for the read model to actually reflect this write instead of guessing
+    # how long propagation takes — see `_await_index_catch_up`.
+    watermarks = dict(state.get("index_watermarks") or {})
+    updated_at = await jira.issue_updated_at(
+        state["space_id"], action.target_issue_key, state["user_id"], state["username"],
+    )
+    if updated_at:
+        watermarks[action.target_issue_key] = updated_at
+    return {
+        "committed_actions": committed, "index_watermarks": watermarks, "pre_write_updated_at": pre_writes,
+        "status": "waiting_reevaluation" if done else "committing",
+    }
 
 
 def _after_commit_one_action(state: SprintRecoveryState) -> str:
@@ -479,17 +1032,48 @@ async def reevaluate_node(state: SprintRecoveryState, retrieval) -> dict:
     """Resumed either by a real Kafka event (`kafka_trigger.py`) or a manual trigger — re-runs the
     same deterministic risk detection used at the start, so "recovered" is a code-computed fact, not
     an LLM's opinion that things look better.
+
+    Waits for the read model to catch up to this workflow's own committed writes first: every resume
+    path (auto-after-approve, a human clicking "re-check now", and the Kafka trigger — which runs on a
+    *different consumer group* than vectorization-service and so can beat it to the index) is capable
+    of reading a sprint that doesn't yet reflect the actions just taken. See `_await_index_catch_up`.
     """
-    signals = await _detect_risk_signals(retrieval, state["space_id"], state["sprint_id"])
-    forecast_signal = next((s for s in signals if s.signal_type == "low_completion_forecast"), None)
-    still_at_risk = any(s.signal_type == "long_in_progress" for s in signals) or forecast_signal is not None
+    watermarks = state.get("index_watermarks") or {}
+    caught_up = await _await_index_catch_up(
+        retrieval, state["space_id"], state["sprint_id"], watermarks,
+    )
+    # Pair each issue this workflow wrote to with (its timestamp before our write, the one our write
+    # produced) so staleness isn't measured from our own automated touch — see
+    # `_last_update_not_by_this_workflow` for the false-`recovered` this closes.
+    pre_writes = state.get("pre_write_updated_at") or {}
+    own_writes = {key: (before, watermarks.get(key)) for key, before in pre_writes.items()}
+    signals = await _detect_risk_signals(
+        retrieval, state["space_id"], state["sprint_id"], own_writes=own_writes,
+    )
+    # **Found live**: this used to only check for `long_in_progress`/`low_completion_forecast` by
+    # name — when `blocked_no_flag` was added as a real signal type, it was never added here, so a
+    # sprint whose only remaining problem was still-blocked issues (with completion otherwise healthy)
+    # would have been reported "recovered" while genuinely still blocked. Any signal firing at all
+    # means still at risk; there is no case where `_detect_risk_signals` returns a non-empty list and
+    # the sprint should be considered healthy.
+    still_at_risk = bool(signals)
     if not still_at_risk:
-        return {"status": "recovered", "risk_signals": signals}
+        # Set fresh even on the happy path — a stale read can never manufacture a false "recovered" (see
+        # the field's own comment in state.py), but it's still the honest, current answer to "did this
+        # particular check actually confirm the read model caught up."
+        return {"status": "recovered", "risk_signals": signals, "index_catch_up_timed_out": not caught_up}
+
     if state["escalation_round"] >= state["max_escalation_rounds"]:
-        return {"status": "escalated", "risk_signals": signals}
+        return {"status": "escalated", "risk_signals": signals, "index_catch_up_timed_out": not caught_up}
+    plan = state.get("approved_plan")
+    just_done = [
+        _describe_action(a) for i, a in enumerate(plan.actions) if str(i) in (state.get("committed_actions") or {})
+    ] if plan else []
     return {
         "status": "diagnosing", "risk_signals": signals, "escalation_round": state["escalation_round"] + 1,
-        "committed_actions": {}, "approved_plan": None, "decision": None,
+        "committed_actions": {}, "index_watermarks": {}, "index_catch_up_timed_out": not caught_up,
+        "approved_plan": None, "decision": None,
+        "prior_committed_actions": state.get("prior_committed_actions", []) + just_done,
     }
 
 
@@ -533,7 +1117,7 @@ def build_sprint_recovery_graph(client, model: str, space_membership: SpaceMembe
         return await diagnose_node(state, client, model, retrieval)
 
     async def _plan(state: SprintRecoveryState) -> dict:
-        return await plan_node(state, client, model)
+        return await plan_node(state, client, model, retrieval)
 
     async def _approval(state: SprintRecoveryState) -> dict:
         return await approval_node(state, space_membership)
@@ -581,19 +1165,33 @@ async def trigger_reevaluation(compiled_graph, thread_id: str, source: str, deta
 
 
 async def retry_recovery_commit(compiled_graph, thread_id: str) -> dict:
-    """Un-sticks the commit phase after `status in ("committing", "failed")` — same two-case split as
-    `app/planning/rollout_graph.py::retry_rollout`, and for the identical reason: `status="committing"`
-    left by a real crash already has a pending task (bare `ainvoke(None, ...)` is enough); a clean
-    `status="failed"` reached a real `END` with nothing pending, so `approval`'s outgoing edge has to be
-    replayed via `as_node` to re-arm `commit_one_action`. See that sibling function's docstring for why
-    `as_node` names the node whose edge should fire, not the node that reruns — verified there, reused
-    here rather than re-verified from scratch.
+    """Un-sticks a `status="failed"` (or resumes a crashed `"committing"`) thread. Three cases, not
+    two — **found live**: `status="failed"` can be reached two structurally different ways, and the
+    original two-case version only handled one of them correctly.
+
+    1. `status == "committing"`: a real crash left a pending task; bare `ainvoke(None, ...)` resumes it,
+       same as `app/planning/rollout_graph.py::retry_rollout`.
+    2. `status == "failed"` *after* a plan was approved (a `JiraActionError` mid-commit): nothing new
+       needs deciding, just re-arm `commit_one_action` by replaying `approval`'s outgoing edge via
+       `as_node="approval"` — see that sibling function's docstring for why `as_node` names the node
+       whose edge should fire, not the node that reruns.
+    3. `status == "failed"` *before* any plan was ever approved (diagnose/plan-generation hit the token
+       budget, or — the case this was actually missing — `plan_node`'s `_validate_plan_issue_keys`
+       guardrail rejected every proposed action as citing an unknown issue key). Here `approved_plan`
+       is still `None`. Case 2's `as_node="approval"` path would re-arm `commit_one_action_node`, which
+       unconditionally reads `state["approved_plan"].actions` — a guaranteed crash on `None`. Retrying
+       this case has to re-enter `plan` instead, via `as_node="diagnose"` (evidence/hypotheses are
+       already in state from the diagnose that already succeeded, so this cleanly re-runs just the plan
+       LLM call, not the whole diagnosis).
     """
     config = {"configurable": {"thread_id": thread_id}}
     snap = await compiled_graph.aget_state(config)
     if snap.values.get("status") == "committing":
         return await compiled_graph.ainvoke(None, config=config)
-    await compiled_graph.aupdate_state(config, {"status": "committing", "error": None}, as_node="approval")
+    if snap.values.get("approved_plan") is not None:
+        await compiled_graph.aupdate_state(config, {"status": "committing", "error": None}, as_node="approval")
+        return await compiled_graph.ainvoke(None, config=config)
+    await compiled_graph.aupdate_state(config, {"status": "diagnosing", "error": None}, as_node="diagnose")
     return await compiled_graph.ainvoke(None, config=config)
 
 
@@ -607,10 +1205,46 @@ async def list_checkpoint_history(compiled_graph, thread_id: str) -> list:
     return [s async for s in compiled_graph.aget_state_history(config)]
 
 
-async def build_escalation_summary(compiled_graph, thread_id: str) -> str:
-    """Synthesizes what was actually tried across every escalation round into one human-readable
-    paragraph — for the moment `reevaluate_node` gives up and hands off to a human, who shouldn't have
-    to reconstruct "what did the automation already attempt" from a raw checkpoint list themselves.
+def _describe_action(action: RecoveryAction) -> str:
+    """One executed action, in a sentence a non-engineer can audit — including the full comment text.
+    Used by the escalation handoff panel and its notification/log equivalent, both of which exist so a
+    human can see exactly what was already done in Jira on their behalf.
+    """
+    key = action.target_issue_key
+    if action.action_type == "add_comment":
+        return f'Commented on {key}: "{action.comment_body}"'
+    if action.action_type == "change_priority":
+        return f"Raised {key} priority to {action.new_priority}"
+    if action.action_type == "move_out_of_sprint":
+        return f"Moved {key} out of the sprint"
+    if action.action_type == "link_dependency":
+        return f"Marked {key} as blocked by {action.depends_on_issue_key}"
+    return f"{action.action_type} on {key}"
+
+
+async def build_escalation_summary(compiled_graph, thread_id: str) -> dict:
+    """Synthesizes what was actually tried across every escalation round — for the moment
+    `reevaluate_node` gives up and hands off to a human, who shouldn't have to reconstruct "what did
+    the automation already attempt" from a raw checkpoint list themselves.
+
+    Returns **structured** data (`{"rounds": [{"round", "plan_name", "rationale", "actions"}, ...],
+    "still_at_risk_reasons": [str], "unaddressed_issue_keys": [str]}`), not a pre-flattened paragraph —
+    found live that one run-on paragraph covering 3 rounds was unreadable in the UI. Callers render it
+    for their own audience: `sprint_recovery_routes.py` returns it structured for the frontend to lay
+    out as per-round cards; `flatten_escalation_summary` below turns it into a single string for the
+    notification/log path, which has no UI to lay cards out in.
+
+    **`unaddressed_issue_keys`, found live**: every escalation looks the same at a glance — red,
+    "needs a human decision" — but two very different situations land there. One: every per-issue risk
+    signal still open at the final check was already acted on at least once across the rounds above
+    (a comment, a reprioritization, a link, a move) — the automation genuinely exhausted what its 4
+    action types can do, and what's left is real engineering time, not more planning. The other: some
+    flagged issue was never acted on at all (budget ran out first, or a plan never targeted it) — a
+    real gap, not just "waiting on a human to do the work." Sprint-level signals (e.g.
+    `low_completion_forecast`, which carries no `issue_key`) are excluded from this check on purpose:
+    none of the 4 action types can ever mark story points done, so that signal is *expected* to still
+    be firing at every escalation regardless of how complete the response was — counting it here would
+    make every single escalation look "unresolved," which defeats the point of the distinction.
 
     Reuses the same `aget_state_history` walk `list_checkpoint_history` already does for the
     time-travel picker rather than a separate accumulating state field: every checkpoint LangGraph
@@ -633,6 +1267,7 @@ async def build_escalation_summary(compiled_graph, thread_id: str) -> str:
 
     rounds: list = []
     seen_rounds = set()
+    actioned_issue_keys: set = set()
     for snap in history:
         if snap.values.get("status") != "waiting_reevaluation":
             continue
@@ -643,21 +1278,51 @@ async def build_escalation_summary(compiled_graph, thread_id: str) -> str:
         if round_num in seen_rounds:
             continue  # aget_state_history can repeat a snapshot around branch points (e.g. time-travel)
         seen_rounds.add(round_num)
+        # Describe each action from the plan itself, not from `committed_actions`' terse result
+        # strings. Found live: `JiraActionsClient._add_comment` returns "comment added to ATC-122",
+        # which tells a reviewer that *a* comment was posted but not what it said — and the whole
+        # point of this panel is letting a human audit what the automation already did on their
+        # behalf. The plan's own `RecoveryAction` still carries the full comment body, target
+        # priority, and dependency, so read the detail from there and use `committed_actions` only
+        # for what it actually knows: which indices really executed.
         committed = snap.values.get("committed_actions") or {}
-        actions = [committed[k] for k in sorted(committed, key=int)]
-        rounds.append({"round": round_num, "plan_name": plan.name, "rationale": plan.rationale, "actions": actions})
+        actions = []
+        for i, a in enumerate(plan.actions):
+            if str(i) not in committed:
+                continue
+            actions.append(_describe_action(a))
+            actioned_issue_keys.add(a.target_issue_key)
+        rounds.append({
+            "round": round_num + 1, "plan_name": plan.name, "rationale": plan.rationale, "actions": actions,
+        })
 
+    final_signals = (history[-1].values.get("risk_signals") if history else None) or []
+    flagged_issue_keys = {s.issue_key for s in final_signals if s.issue_key}
+    return {
+        "rounds": rounds,
+        "still_at_risk_reasons": [s.description for s in final_signals],
+        "unaddressed_issue_keys": sorted(flagged_issue_keys - actioned_issue_keys),
+    }
+
+
+def flatten_escalation_summary(summary: dict) -> str:
+    """The single-string rendering of `build_escalation_summary`'s structured output — for the
+    notification/log path (Slack text field, WARNING log line), which has no UI to lay per-round cards
+    out in."""
+    rounds = summary.get("rounds") or []
     if not rounds:
         return "No recovery plan was ever committed before this workflow reached its escalation cap."
-
     lines = [
-        f"Round {r['round'] + 1}: approved \"{r['plan_name']}\" ({r['rationale']}). "
+        f"Round {r['round']}: approved \"{r['plan_name']}\" ({r['rationale']}). "
         f"Actions taken: {'; '.join(r['actions']) if r['actions'] else 'none'}."
         for r in rounds
     ]
-    final_signals = (history[-1].values.get("risk_signals") if history else None) or []
-    if final_signals:
-        lines.append("Still at risk because: " + " ".join(s.description for s in final_signals))
+    reasons = summary.get("still_at_risk_reasons") or []
+    if reasons:
+        lines.append("Still at risk because: " + " ".join(reasons))
+    unaddressed = summary.get("unaddressed_issue_keys") or []
+    if unaddressed:
+        lines.append(f"Never got attempted: {', '.join(unaddressed)}.")
     return " ".join(lines)
 
 
