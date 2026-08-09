@@ -508,28 +508,34 @@ async def test_action_failure_mid_commit_then_retry_recovery_commit_finishes():
     assert jira.idempotency_keys[0] != jira.idempotency_keys[1]  # different action index, different key
 
 
-async def test_pre_write_baseline_survives_a_failed_attempt_instead_of_being_recomputed_on_retry():
-    """**Found live in review**: a failed attempt used to return without `pre_write_updated_at`,
-    discarding the baseline it had already captured. Harmless on a clean failure — but if the write
-    actually succeeded server-side and only the client saw a timeout (exactly what the idempotency key
-    exists for), a retry's baseline GET would run *after* that write landed, silently reintroducing the
-    false-`recovered` bug through the retry path. The baseline from the first attempt must win, not
-    whatever a later GET happens to see.
+async def test_approval_captures_every_action_targets_baseline_up_front_before_any_commit():
+    """**Found live in review, empirically reproduced with a real Postgres crash-resume harness (see
+    `test_a_genuine_crash_between_a_write_landing_and_the_checkpoint_does_not_poison_the_baseline`
+    below)**: capturing each issue's pre-write baseline lazily inside `commit_one_action_node` — right
+    before that specific write — has a gap a caught `JiraActionError` can't close: a genuine process
+    crash between the write landing on jira-backend and the node returning (so LangGraph never
+    checkpoints that attempt) means a resumed attempt recomputes the baseline via a GET that now runs
+    *after* the crashed write already landed, reintroducing the false-`recovered` bug through the
+    resume path. Fixed by capturing every target/dependency issue's baseline in `approval_node`,
+    on the final (post-edit) action list, before commit_one_action_node ever runs for any of them —
+    this test locks in that both actions' baselines land in the SAME checkpoint approval_node produces,
+    not spread across each action's own commit step.
     """
-    # PAY-142's *first ever* read (the failed attempt's baseline) must be the one that survives — every
-    # later read for it (a watermark read after a successful retry, or a skipped-baseline re-read that
-    # never should happen) is deliberately a different value, so the test would catch either one leaking
-    # into the baseline.
-    reads_by_key = {"PAY-142": iter(["2026-08-01T00:00:00Z", "2026-08-09T12:00:00Z", "2026-08-09T12:00:01Z"])}
+    reads_by_key = {
+        "PAY-142": iter(["2026-08-01T00:00:00Z"]), "PAY-97": iter(["2026-07-30T00:00:00Z"]),
+    }
 
     class _DriftingJira(FakeJiraActions):
         async def issue_updated_at(self, space_id, issue_key, user_id, username):
             seq = reads_by_key.setdefault(issue_key, iter([]))
-            return next(seq, "2026-08-09T09:00:00Z")  # generic fallback for PAY-97's baseline/watermark
+            # A read past the first one for a key means something re-fetched a baseline that should
+            # already have been captured at approval time — return an obviously-wrong sentinel so a
+            # regression shows up as a wrong value, not a silent pass.
+            return next(seq, "1999-01-01T00:00:00Z")
 
     diagnosis = DiagnosisResult(hypotheses=[_hyp(["ev1"])], overall_confidence="sufficient")
     retrieval = FakeRetrieval(issue_rows=list(_AT_RISK_ROWS))
-    jira = _DriftingJira(fail_on_call=1)  # the very first action fails
+    jira = _DriftingJira(fail_on_call=1)  # the very first commit attempt still fails
     graph = _graph(_client(diagnosis, _plan_set()), retrieval, jira)
     cfg = _cfg()
     thread_id = cfg["configurable"]["thread_id"]
@@ -537,13 +543,105 @@ async def test_pre_write_baseline_survives_a_failed_attempt_instead_of_being_rec
     await graph.ainvoke(_state(), config=cfg)
     failed = await graph.ainvoke(Command(resume={"decision": "approve", "plan_id": "plan_a"}), config=cfg)
     assert failed["status"] == "failed"
-    assert failed["pre_write_updated_at"] == {"PAY-142": "2026-08-01T00:00:00Z"}
+    # Both actions' baselines are already present after approval — PAY-97's included, even though its
+    # own commit step hasn't even been attempted yet.
+    assert failed["pre_write_updated_at"] == {
+        "PAY-142": "2026-08-01T00:00:00Z", "PAY-97": "2026-07-30T00:00:00Z",
+    }
 
     result = await retry_recovery_commit(graph, thread_id)
     assert "__interrupt__" in result
-    # Still the first (pre-attempt) baseline — NOT the second GET's later timestamp, which a retry that
-    # recomputed from scratch would have picked up instead.
-    assert result["pre_write_updated_at"]["PAY-142"] == "2026-08-01T00:00:00Z"
+    # Unchanged by the retry — nothing re-fetched them.
+    assert result["pre_write_updated_at"] == {
+        "PAY-142": "2026-08-01T00:00:00Z", "PAY-97": "2026-07-30T00:00:00Z",
+    }
+
+
+async def test_a_genuine_crash_between_a_write_landing_and_the_checkpoint_does_not_poison_the_baseline():
+    """The real fault-injection reproduction of the bug the commit above fixes — same two-process,
+    real `AsyncPostgresSaver` shape as `test_crash_mid_commit_resumes_without_duplicate_actions`, with
+    a shared `real_world` dict standing in for jira-backend's actual database (the one thing both
+    "processes" have in common — a crash resets ai-service's in-memory progress, not jira-backend's).
+    """
+    psycopg = pytest.importorskip("psycopg")
+    try:
+        conn = await psycopg.AsyncConnection.connect(
+            "postgresql://poc:poc123@localhost:5432/pocdb", connect_timeout=2,
+        )
+        await conn.close()
+    except Exception:
+        pytest.skip("dev Postgres (poc-postgres) not reachable")
+
+    from app.planning.checkpoint import build_checkpointer
+    from contextlib import AsyncExitStack
+
+    db_url = "postgresql://poc:poc123@localhost:5432/pocdb"
+    diagnosis = DiagnosisResult(hypotheses=[_hyp(["ev1"])], overall_confidence="sufficient")
+    thread_id = str(uuid.uuid4())
+    cfg = {"configurable": {"thread_id": thread_id}}
+
+    class _SimulatedCrash(Exception):
+        pass
+
+    real_world = {"PAY-142": "2026-08-01T00:00:00Z", "PAY-97": "2026-08-01T00:00:00Z"}
+
+    class _RealisticCrashJira:
+        def __init__(self):
+            self.calls = []
+
+        async def issue_updated_at(self, space_id, issue_key, user_id, username):
+            return real_world.get(issue_key)
+
+        async def execute(self, space_id, action, user_id, username, idempotency_key=None):
+            self.calls.append((action.action_type, action.target_issue_key))
+            if len(self.calls) == 2:
+                # The write actually lands on jira-backend's DB (what @PreUpdate does) before the
+                # process dies — the same ambiguity the idempotency key exists for, via a crash
+                # instead of a client-observed timeout.
+                real_world[action.target_issue_key] = "2026-08-09T12:00:00Z"
+                raise _SimulatedCrash("process died right after the write landed, before checkpointing")
+            return f"{action.action_type} on {action.target_issue_key} done"
+
+    stack1 = AsyncExitStack()
+    try:
+        checkpointer1 = await build_checkpointer(db_url, stack1)
+        graph1 = build_sprint_recovery_graph(
+            _client(diagnosis, _plan_set()), "fake-model", NoopSpaceMembershipChecker(),
+            FakeRetrieval(issue_rows=list(_AT_RISK_ROWS)), _RealisticCrashJira(),
+        ).compile(checkpointer=checkpointer1)
+
+        await graph1.ainvoke(_state(), config=cfg)
+        with pytest.raises(_SimulatedCrash):
+            await graph1.ainvoke(Command(resume={"decision": "approve", "plan_id": "plan_a"}), config=cfg)
+
+        mid_state = await graph1.aget_state(cfg)
+        # Captured at approval time, before either action was attempted — survives the crash untouched.
+        assert mid_state.values["pre_write_updated_at"] == {
+            "PAY-142": "2026-08-01T00:00:00Z", "PAY-97": "2026-08-01T00:00:00Z",
+        }
+    finally:
+        await stack1.aclose()
+
+    stack2 = AsyncExitStack()
+    try:
+        checkpointer2 = await build_checkpointer(db_url, stack2)
+        graph2 = build_sprint_recovery_graph(
+            _client(diagnosis, _plan_set()), "fake-model", NoopSpaceMembershipChecker(),
+            FakeRetrieval(issue_rows=list(_AT_RISK_ROWS)), _RealisticCrashJira(),
+        ).compile(checkpointer=checkpointer2)
+
+        final = await graph2.ainvoke(None, config=cfg)
+        assert "__interrupt__" in final
+        # The critical assertion: PAY-97's baseline is still the TRUE pre-write value, even though the
+        # crashed write already landed in real_world before this resumed attempt ever ran.
+        assert final["pre_write_updated_at"]["PAY-97"] == "2026-08-01T00:00:00Z"
+    finally:
+        await stack2.aclose()
+        async with await psycopg.AsyncConnection.connect(db_url, autocommit=True) as conn:
+            for table in ("checkpoints", "checkpoint_writes", "checkpoint_blobs"):
+                await conn.execute(
+                    f"DELETE FROM planning_workflows.{table} WHERE thread_id = %s", (thread_id,)
+                )
 
 
 async def test_retry_after_plan_generation_failure_reenters_plan_instead_of_crashing():

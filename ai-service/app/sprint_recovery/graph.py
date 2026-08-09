@@ -893,7 +893,9 @@ def _after_plan(state: SprintRecoveryState) -> str:
     return END if state["status"] in ("failed", "escalated") else "approval"
 
 
-async def approval_node(state: SprintRecoveryState, space_membership: SpaceMembershipChecker) -> dict:
+async def approval_node(
+    state: SprintRecoveryState, space_membership: SpaceMembershipChecker, jira: JiraActionsClient,
+) -> dict:
     """The plan-approval pause — same *shape* as `rollout_graph.py`'s `review_node` (approve/edit/
     reject a finished artifact), included here to show the two pause shapes side by side in one
     workflow rather than because this one alone would justify a new graph. Unlike rollout's binary
@@ -941,9 +943,33 @@ async def approval_node(state: SprintRecoveryState, space_membership: SpaceMembe
             actions=[RecoveryAction.model_validate(a) for a in payload["actions"]],
         )
 
+    # **Found live, empirically reproduced, not theorized**: capturing each issue's pre-write baseline
+    # lazily inside commit_one_action_node — right before that specific write — has a real gap a caught
+    # JiraActionError can't close: a genuine process crash between the write landing on jira-backend and
+    # commit_one_action_node returning (so LangGraph never checkpoints that attempt at all) means the
+    # resumed attempt recomputes the baseline from scratch, via a GET that now runs *after* the crashed
+    # write already landed. Reproduced with a two-process Postgres crash-resume harness (same shape as
+    # the real crash-resume test): the resumed baseline for the crashed action came back as the
+    # post-write timestamp, not the true pre-write one — reintroducing Follow-up 12's false-`recovered`
+    # bug through exactly the scenario this feature's durable-execution claim is built on. Fixed by
+    # capturing every target/dependency issue's baseline here instead, on the *final*, post-edit action
+    # list, before any write in this round has happened — this return is a normal node completion
+    # LangGraph checkpoints atomically, so by the time commit_one_action_node ever runs (first attempt
+    # or any resume), the baseline it needs already exists. commit_one_action_node's own lazy capture
+    # stays as a defensive fallback, not the primary path.
+    pre_writes = dict(state.get("pre_write_updated_at") or {})
+    keys_needing_baseline = {
+        key for a in chosen.actions for key in (a.target_issue_key, a.depends_on_issue_key)
+        if key and key not in pre_writes
+    }
+    for key in sorted(keys_needing_baseline):
+        before = await jira.issue_updated_at(state["space_id"], key, state["user_id"], state["username"])
+        if before:
+            pre_writes[key] = before
+
     return {
         "decision": decision or "approve", "approved_plan": chosen, "status": "committing",
-        "committed_actions": {}, "index_watermarks": {},
+        "committed_actions": {}, "index_watermarks": {}, "pre_write_updated_at": pre_writes,
     }
 
 
@@ -1132,7 +1158,7 @@ def build_sprint_recovery_graph(client, model: str, space_membership: SpaceMembe
         return await plan_node(state, client, model, retrieval)
 
     async def _approval(state: SprintRecoveryState) -> dict:
-        return await approval_node(state, space_membership)
+        return await approval_node(state, space_membership, jira)
 
     async def _commit_one(state: SprintRecoveryState) -> dict:
         return await commit_one_action_node(state, jira)
