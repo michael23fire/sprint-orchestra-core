@@ -31,8 +31,8 @@ from app.sprint_recovery.graph import build_sprint_recovery_graph
 from app.sprint_recovery.state import initial_recovery_state
 from langgraph.checkpoint.memory import InMemorySaver
 
-SPACE_ID = 5000014
-SPRINT_ID = 5000074
+SPACE_ID = 5000018  # re-pointed 2026-08-06 after codex/m3_seed.py was re-run — see sprint_recovery_eval.py's note
+SPRINT_ID = 5000104
 
 
 class PoisonedRetrieval:

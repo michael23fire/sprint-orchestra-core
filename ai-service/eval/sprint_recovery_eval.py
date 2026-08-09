@@ -4,6 +4,13 @@
 catches, against every real sprint in the AtlasCart corpus (space 5000014) — not synthetic scenarios
 crafted to guarantee a specific branch fires.
 
+**IDs below were re-pointed 2026-08-06** after re-running `codex/m3_seed.py inject` with a fresh
+`ATLASCART_AS_OF` to keep "the active sprint" aligned with real calendar time (see Case Study 32's
+"Follow-up 9" for why and how) — the reinjection process deletes and recreates the space/issues/sprints
+with new auto-increment ids each time (issue *keys* like ATC-78 stay stable, numeric ids do not, per
+`codex/DATASET_SPEC.md`'s own documented "database identity values may differ" caveat). Space
+5000014→5000018, Sprint 1-7 5000068-5000074→5000084-5000104.
+
 **Why real sprints, not seeded/rigged ones, and what that trade-off costs.** `RootCauseHypothesis`
 grounding and `_validate_plan_issue_keys` are already proven to work *when triggered* — that's what
 `tests/test_sprint_recovery_graph.py`'s fake-client tests are for, same shape as Case Study 29's
@@ -14,7 +21,7 @@ the real `diagnose` step against the 7 real AtlasCart sprints and reports the tr
 turns out to be. Small sample (n=7, all of them, not a subsample) — this is a directional measurement,
 not a statistically powered study, named plainly rather than dressed up as more than it is.
 
-Usage: python eval/sprint_recovery_eval.py [--url http://localhost:8200] [--space-id 5000014]
+Usage: python eval/sprint_recovery_eval.py [--url http://localhost:8200] [--space-id 5000018]
 No third-party deps — stdlib only.
 """
 from __future__ import annotations
@@ -27,9 +34,9 @@ import urllib.error
 import urllib.request
 
 SPRINTS = [
-    (5000068, "AtlasCart Sprint 1"), (5000069, "AtlasCart Sprint 2"), (5000070, "AtlasCart Sprint 3"),
-    (5000071, "AtlasCart Sprint 4"), (5000072, "AtlasCart Sprint 5"), (5000073, "AtlasCart Sprint 6"),
-    (5000074, "AtlasCart Sprint 7"),
+    (5000098, "AtlasCart Sprint 1"), (5000099, "AtlasCart Sprint 2"), (5000100, "AtlasCart Sprint 3"),
+    (5000101, "AtlasCart Sprint 4"), (5000102, "AtlasCart Sprint 5"), (5000103, "AtlasCart Sprint 6"),
+    (5000104, "AtlasCart Sprint 7"),
 ]
 
 
@@ -45,7 +52,7 @@ def _post(url: str, body: dict, headers: dict) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://localhost:8200")
-    parser.add_argument("--space-id", type=int, default=5000014)
+    parser.add_argument("--space-id", type=int, default=5000018)
     args = parser.parse_args()
     headers = {"X-User-Id": "5000154", "X-Username": "atlascart.maya"}
 
