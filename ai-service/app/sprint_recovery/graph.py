@@ -952,15 +952,25 @@ async def approval_node(
     # the real crash-resume test): the resumed baseline for the crashed action came back as the
     # post-write timestamp, not the true pre-write one — reintroducing Follow-up 12's false-`recovered`
     # bug through exactly the scenario this feature's durable-execution claim is built on. Fixed by
-    # capturing every target/dependency issue's baseline here instead, on the *final*, post-edit action
-    # list, before any write in this round has happened — this return is a normal node completion
-    # LangGraph checkpoints atomically, so by the time commit_one_action_node ever runs (first attempt
-    # or any resume), the baseline it needs already exists. commit_one_action_node's own lazy capture
-    # stays as a defensive fallback, not the primary path.
+    # capturing every target issue's baseline here instead, on the *final*, post-edit action list,
+    # before any write in this round has happened — this return is a normal node completion LangGraph
+    # checkpoints atomically, so by the time commit_one_action_node ever runs (first attempt or any
+    # resume), the baseline it needs already exists. commit_one_action_node's own lazy capture stays as
+    # a defensive fallback, not the primary path.
+    #
+    # **Found live, a second time, in the very fix meant to close the first one**: this originally also
+    # captured `depends_on_issue_key` "for completeness." That's wrong, not just unnecessary —
+    # `commit_one_action_node` only ever writes a *watermark* for `action.target_issue_key`
+    # (`link_dependency` never touches jira-backend's row for the depended-on issue at all, only
+    # creates a link entity), so a `depends_on_issue_key` given a baseline here would get `after=None`
+    # forever. `_last_update_not_by_this_workflow` reads a missing watermark as "we can't prove someone
+    # touched it after us" and falls back to the baseline unconditionally — which means a real human
+    # updating that issue later in the same round would be silently ignored, staleness frozen at the
+    # pre-approval snapshot with no way to ever un-stick it. Scoped to target_issue_key only, the only
+    # key type `commit_one_action_node` ever actually produces a watermark for.
     pre_writes = dict(state.get("pre_write_updated_at") or {})
     keys_needing_baseline = {
-        key for a in chosen.actions for key in (a.target_issue_key, a.depends_on_issue_key)
-        if key and key not in pre_writes
+        a.target_issue_key for a in chosen.actions if a.target_issue_key not in pre_writes
     }
     for key in sorted(keys_needing_baseline):
         before = await jira.issue_updated_at(state["space_id"], key, state["user_id"], state["username"])

@@ -22,6 +22,7 @@ from app.sprint_recovery.graph import (
     _describe_action,
     _detect_risk_signals,
     _gather_evidence,
+    _last_update_not_by_this_workflow,
     build_escalation_summary,
     build_sprint_recovery_graph,
     flatten_escalation_summary,
@@ -1362,3 +1363,38 @@ async def test_index_catch_up_survives_a_transient_poll_failure_instead_of_crash
 
     assert caught_up is True
     assert calls["n"] == 2  # failed once, succeeded on retry — never raised out of the function
+
+
+async def test_depends_on_issue_key_never_gets_a_baseline_since_it_never_gets_a_watermark():
+    """**Found live, in the very fix meant to close the crash-resume baseline bug**: `approval_node`
+    originally captured a pre-write baseline for `depends_on_issue_key` too, "for completeness."
+    `link_dependency` never writes to jira-backend's row for the depended-on issue (it only creates an
+    `IssueLink` entity), so `commit_one_action_node` never produces a watermark for that key — its
+    `own_writes` entry would be stuck at `after=None` forever, and `_last_update_not_by_this_workflow`
+    reads that as "can't prove a human touched it since," permanently freezing its staleness
+    measurement at the pre-approval snapshot. A real update to it later in the same round must not be
+    silently ignored.
+    """
+    diagnosis = DiagnosisResult(hypotheses=[_hyp(["ev1"])], overall_confidence="sufficient")
+    plan = _plan_set(actions=[
+        # PAY-97 here is ONLY ever a depends_on_issue_key in this plan — never a target of anything.
+        RecoveryAction(action_type="link_dependency", target_issue_key="PAY-142", depends_on_issue_key="PAY-97"),
+    ])
+    jira = FakeJiraActions(updated_at="2026-08-09T00:00:00Z")
+    graph = _graph(_client(diagnosis, plan), FakeRetrieval(issue_rows=list(_AT_RISK_ROWS)), jira)
+    cfg = _cfg()
+
+    await graph.ainvoke(_state(), config=cfg)
+    await graph.ainvoke(Command(resume={"decision": "approve", "plan_id": "plan_a"}), config=cfg)
+
+    snap = await graph.aget_state(cfg)
+    # Only PAY-142 (the actual target) gets a baseline — PAY-97 (depends_on only) does not.
+    assert set(snap.values["pre_write_updated_at"]) == {"PAY-142"}
+
+    # A real human update to PAY-97 later in the same round must be read normally, not ignored.
+    own_writes = {
+        key: (before, snap.values["index_watermarks"].get(key))
+        for key, before in snap.values["pre_write_updated_at"].items()
+    }
+    fresh_human_update = {"issue_key": "PAY-97", "status": "blocked", "updated_at": "2026-08-08T00:00:00Z"}
+    assert _last_update_not_by_this_workflow(fresh_human_update, own_writes) == "2026-08-08T00:00:00Z"
