@@ -1,6 +1,7 @@
 package com.jiraagentic.app.config;
 
 import com.jiraagentic.app.security.GatewayInternalAuthFilter;
+import com.jiraagentic.app.security.IdempotencyFilter;
 import com.jiraagentic.app.security.oauth.OAuth2LoginSuccessHandler;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
@@ -20,11 +21,13 @@ public class SecurityConfig {
             HttpSecurity http,
             ObjectProvider<ClientRegistrationRepository> clientRegistrationRepositoryProvider,
             ObjectProvider<OAuth2LoginSuccessHandler> oauth2LoginSuccessHandler,
-            GatewayInternalAuthFilter gatewayInternalAuthFilter
+            GatewayInternalAuthFilter gatewayInternalAuthFilter,
+            IdempotencyFilter idempotencyFilter
     ) throws Exception {
         http
                 .csrf(AbstractHttpConfigurer::disable)
                 .addFilterBefore(gatewayInternalAuthFilter, AnonymousAuthenticationFilter.class)
+                .addFilterAfter(idempotencyFilter, GatewayInternalAuthFilter.class)
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(
                                 "/swagger-ui/**",
