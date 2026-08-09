@@ -226,7 +226,17 @@ public class IssueService {
         issueHistoryService.recordFieldChange(issue, actorUserId, "labels", oldLabels, labelNames(issue));
         issueHistoryService.recordFieldChange(issue, actorUserId, "issueOrder", oldIssueOrder, issue.getIssueOrder());
 
-        Issue saved = issueRepository.save(issue);
+        // saveAndFlush, not save: `save()` on an already-managed entity is a merge() Hibernate doesn't
+        // have to execute as SQL immediately — the actual UPDATE (and @PreUpdate's `updatedAt = now()`)
+        // can be deferred to the next flush point, which without an intervening query means transaction
+        // commit, *after* this method already returned `toDto(saved)` built from the stale, pre-flush
+        // in-memory `updatedAt`. **Found live**: every response from this endpoint reported the
+        // *previous* write's `updatedAt`, not this one's — confirmed against the raw Postgres row,
+        // which was already correctly ahead of what every subsequent GET/PUT response kept showing.
+        // This matters beyond cosmetics: `sprint_recovery`'s read-your-writes wait
+        // (`_await_index_catch_up`) reads this exact field back as its watermark, so a stale response
+        // here silently broke that consistency check at the source, not downstream.
+        Issue saved = issueRepository.saveAndFlush(issue);
         if (!sameSprint(oldSprintEntity, saved.getSprint())) {
             sprintHistoryService.trackRemoved(oldSprintEntity, saved);
             sprintHistoryService.trackAdded(saved.getSprint(), saved);
