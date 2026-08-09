@@ -39,6 +39,12 @@ public record IssueIngestionMessage(
         Long parentId,
         String parentKey,
         String parentTitle,
+        // Owner and size. Carried on the upsert (not left to the history stream) for the same reason
+        // priority is: both are usually set once at creation, and a history-only sync never observes
+        // that initial value. See vectorization-service migrations/012.
+        Long assigneeId,
+        String assigneeName,
+        Integer storyPoints,
         Instant createdAt,
         Instant updatedAt
 ) {
@@ -60,6 +66,9 @@ public record IssueIngestionMessage(
                 e.parentId(),
                 e.parentKey(),
                 e.parentTitle(),
+                e.assigneeId(),
+                e.assigneeName(),
+                e.storyPoints(),
                 e.createdAt(),
                 e.updatedAt());
     }
@@ -72,6 +81,9 @@ public record IssueIngestionMessage(
                 e.issueId(),
                 e.issueKey(),
                 e.spaceId(),
+                null,
+                null,
+                null,
                 null,
                 null,
                 null,

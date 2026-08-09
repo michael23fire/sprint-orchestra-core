@@ -168,6 +168,12 @@ class IngestPipeline:
                 # persisted structurally so "is X actually the parent of these subtasks" is a plain
                 # query_issues lookup, not a heuristic guess.
                 parent_key=msg.parent_key,
+                # Owner and size — see migrations/012. Same "carry it on the upsert" reasoning as
+                # priority: both are typically set once at creation, so a history-only sync would
+                # never observe the initial value.
+                assignee_id=msg.assignee_id,
+                assignee_name=msg.assignee_name,
+                story_points=msg.story_points,
                 created_at=msg.created_at,
                 updated_at=msg.updated_at,
             )

@@ -126,6 +126,9 @@ public class IssueService {
                 saved.getParent() != null ? saved.getParent().getId() : null,
                 saved.getParent() != null ? saved.getParent().getIssueKey() : null,
                 saved.getParent() != null ? saved.getParent().getTitle() : null,
+                saved.getAssignee() != null ? saved.getAssignee().getId() : null,
+                saved.getAssignee() != null ? saved.getAssignee().getName() : null,
+                saved.getStoryPoints(),
                 saved.getCreatedAt(), saved.getUpdatedAt(),
                 Instant.now()));
         return toDto(saved);
@@ -231,13 +234,27 @@ public class IssueService {
         if (req.getDescription() != null && !Objects.equals(oldDescription, saved.getDescription())) {
             issueAttachmentService.reconcileEmbeddedAttachments(saved.getId(), actorUserId);
         }
-        // Re-embed when the embeddable text changed, OR when the parent link changed — the parent's
-        // key/title is injected into this issue's own embedded chunk (see IssueContentChangedEvent's
-        // doc), so a re-parent must re-embed even if this issue's own title/description didn't move.
-        // Plain status/priority/sprint edits still don't affect the vector, so they're excluded.
+        // Publish whenever anything IssueIngestionMessage carries actually changed — not just the
+        // embeddable text. **Found live, not hypothetically**: this condition used to only check
+        // title/description/parent, on the reasoning that "plain status/priority/sprint edits don't
+        // affect the vector" — true for the *embedding*, but the same event also carries status,
+        // priority, and sprint_id/sprint_name as structured metadata that vectorization-service's
+        // `handle_issue` unconditionally upserts (independent of whether it re-embeds — see that
+        // method's own comment on why metadata sync must not be gated on "is there text to embed").
+        // With the old condition, every `move_out_of_sprint`/`change_priority` recovery action (and
+        // any plain status drag-and-drop) silently never reached vectorization-service's index at
+        // all: jira-backend's own database was correct, but every downstream read (risk-signal
+        // detection, `/issues/query` sprint filters, evidence retrieval) kept seeing the pre-change
+        // state indefinitely, indistinguishable from a real regression. A manual backfill script was
+        // the only way to catch it up — this fix makes that unnecessary going forward.
         String newParentKey = saved.getParent() != null ? saved.getParent().getIssueKey() : null;
+        String newAssignee = saved.getAssignee() != null ? saved.getAssignee().getName() : null;
         if (!Objects.equals(oldTitle, saved.getTitle()) || !Objects.equals(oldDescription, saved.getDescription())
-                || !Objects.equals(oldParent, newParentKey)) {
+                || !Objects.equals(oldParent, newParentKey) || !Objects.equals(oldStatus, saved.getStatus())
+                || !Objects.equals(oldPriority, saved.getPriority())
+                || !sameSprint(oldSprintEntity, saved.getSprint())
+                || !Objects.equals(oldAssignee, newAssignee)
+                || !Objects.equals(oldStoryPoints, saved.getStoryPoints())) {
             applicationEventPublisher.publishEvent(new IssueContentChangedEvent(
                     saved.getId(), saved.getIssueKey(), saved.getSpace().getId(),
                     saved.getTitle(), saved.getDescription(),
@@ -247,6 +264,9 @@ public class IssueService {
                     saved.getParent() != null ? saved.getParent().getId() : null,
                     newParentKey,
                     saved.getParent() != null ? saved.getParent().getTitle() : null,
+                    saved.getAssignee() != null ? saved.getAssignee().getId() : null,
+                    saved.getAssignee() != null ? saved.getAssignee().getName() : null,
+                    saved.getStoryPoints(),
                     saved.getCreatedAt(), saved.getUpdatedAt(),
                     Instant.now()));
         }
@@ -264,12 +284,31 @@ public class IssueService {
             }
             Sprint oldSprint = child.getSprint();
             child.setSprint(sprintOrNull);
-            issueRepository.save(child);
+            Issue savedChild = issueRepository.save(child);
             if (!sameSprint(oldSprint, sprintOrNull)) {
-                sprintHistoryService.trackRemoved(oldSprint, child);
-                sprintHistoryService.trackAdded(sprintOrNull, child);
+                sprintHistoryService.trackRemoved(oldSprint, savedChild);
+                sprintHistoryService.trackAdded(sprintOrNull, savedChild);
+                // Same fix as update()'s own publish condition, applied here: a cascaded sprint move
+                // changes savedChild's sprint_id in jira-backend's database but, before this, never
+                // told vectorization-service — the cascade path saves the child directly and never
+                // went through update()'s (now-fixed) publish condition at all.
+                String childParentKey = savedChild.getParent() != null ? savedChild.getParent().getIssueKey() : null;
+                applicationEventPublisher.publishEvent(new IssueContentChangedEvent(
+                        savedChild.getId(), savedChild.getIssueKey(), savedChild.getSpace().getId(),
+                        savedChild.getTitle(), savedChild.getDescription(),
+                        savedChild.getIssueType(), savedChild.getStatus(), savedChild.getPriority(),
+                        savedChild.getSprint() != null ? savedChild.getSprint().getId() : null,
+                        savedChild.getSprint() != null ? savedChild.getSprint().getName() : null,
+                        savedChild.getParent() != null ? savedChild.getParent().getId() : null,
+                        childParentKey,
+                        savedChild.getParent() != null ? savedChild.getParent().getTitle() : null,
+                        savedChild.getAssignee() != null ? savedChild.getAssignee().getId() : null,
+                        savedChild.getAssignee() != null ? savedChild.getAssignee().getName() : null,
+                        savedChild.getStoryPoints(),
+                        savedChild.getCreatedAt(), savedChild.getUpdatedAt(),
+                        Instant.now()));
             }
-            cascadeSprintToChildren(child.getId(), sprintOrNull);
+            cascadeSprintToChildren(savedChild.getId(), sprintOrNull);
         }
     }
 

@@ -41,6 +41,7 @@ from app.ingest.pipeline import IngestPipeline
 from app.models import (
     AttachmentIngestionMessage,
     CommentIngestionMessage,
+    IssueHistoryIngestionMessage,
     IssueIngestionMessage,
     SprintIngestionMessage,
 )
@@ -77,10 +78,16 @@ async def _fetch_issues(jira_pool: asyncpg.Pool, space_ids: Optional[List[int]])
     query = """
         SELECT i.id, i.issue_key, i.space_id, i.title, i.description, i.created_at, i.updated_at,
                i.sprint_id, s.name AS sprint_name, i.issue_type, i.status, i.priority,
-               i.parent_id, p.issue_key AS parent_key, p.title AS parent_title
+               i.parent_id, p.issue_key AS parent_key, p.title AS parent_title,
+               -- Owner and size (see vectorization-service migrations/012). Same must-be-selected-here
+               -- reasoning as issue_type/status above: upsert_issue's ON CONFLICT overwrites these
+               -- columns unconditionally, so omitting them from this query would null out real values
+               -- on every backfill run. LEFT JOIN so an unassigned issue keeps NULLs, not dropped.
+               i.assignee_id, a.name AS assignee_name, i.story_points
         FROM issues i
         LEFT JOIN sprints s ON s.id = i.sprint_id
         LEFT JOIN issues p ON p.id = i.parent_id
+        LEFT JOIN users a ON a.id = i.assignee_id
     """
     if space_ids:
         query += " WHERE i.space_id = ANY($1::bigint[])"
@@ -132,6 +139,31 @@ async def _fetch_comments(jira_pool: asyncpg.Pool, space_ids: Optional[List[int]
     return await jira_pool.fetch(query)
 
 
+async def _fetch_history(jira_pool: asyncpg.Pool, space_ids: Optional[List[int]]):
+    """**A real, previously-unfilled gap, found live 2026-08-06**: this backfill script had a fetcher
+    for every content type EXCEPT issue history — `handle_history` (app/ingest/pipeline.py) existed and
+    worked, nothing ever called it here. Invisible for months because the live Kafka path
+    (`jira.content.ingestion`) covers history going forward the same way it covers everything else; it
+    only surfaced when a dataset reseed's raw-SQL writes (bypassing jira-backend's service layer
+    entirely, so no Kafka events fire at all) left `issue_changes` at zero rows for the new space,
+    which in turn made `/issues/history?reopened_only=true` — and therefore
+    `sprint_recovery/graph.py`'s own `_gather_evidence` history evidence — silently return nothing.
+    `actor_id` is joined to `users.name` (display name, matching jira-backend's own `IssueHistoryDto.
+    actorName` convention) rather than `username`.
+    """
+    query = """
+        SELECT h.id, h.issue_id, i.issue_key, i.space_id, h.event_type, h.field_name, h.from_value,
+               h.to_value, h.description, h.created_at, u.name AS actor_name
+        FROM issue_history h
+        JOIN issues i ON i.id = h.issue_id
+        LEFT JOIN users u ON u.id = h.actor_id
+    """
+    if space_ids:
+        query += " WHERE i.space_id = ANY($1::bigint[])"
+        return await jira_pool.fetch(query, space_ids)
+    return await jira_pool.fetch(query)
+
+
 async def _fetch_attachments(jira_pool: asyncpg.Pool, space_ids: Optional[List[int]]):
     query = """
         SELECT a.id, a.issue_id, i.issue_key, i.space_id, a.original_filename,
@@ -170,6 +202,13 @@ async def main() -> None:
         help="Fast, embed-free correction of issues' current sprint membership (sprint_id/"
              "sprint_name) from the source DB. Use when issues were already ingested but landed with "
              "a NULL sprint; touches only those two columns, re-embeds nothing.",
+    )
+    parser.add_argument(
+        "--history-only", action="store_true",
+        help="Fast, embed-free backfill of just issue_changes (handle_history does no chunking/"
+             "embedding by design — see _fetch_history's docstring for why this exists at all). Use "
+             "when issues/comments were already ingested but history was never covered — e.g. after a "
+             "raw-SQL dataset reseed that bypassed jira-backend's Kafka-publishing service layer.",
     )
     parser.add_argument(
         "--issue-priority-only", action="store_true",
@@ -250,6 +289,28 @@ async def main() -> None:
                   f"{has_priority} now have a priority set.")
             return
 
+        if args.history_only:
+            rows = await _fetch_history(jira_pool, space_ids)
+            for row in rows:
+                msg = IssueHistoryIngestionMessage(
+                    event_id=str(uuid.uuid4()),
+                    event_type="issue_history_added",
+                    emitted_at=row["created_at"] or datetime.now(timezone.utc),
+                    history_id=row["id"],
+                    issue_id=row["issue_id"],
+                    issue_key=row["issue_key"],
+                    space_id=row["space_id"],
+                    change_event_type=row["event_type"],
+                    field_name=row["field_name"],
+                    from_value=row["from_value"],
+                    to_value=row["to_value"],
+                    description=row["description"],
+                    actor_name=row["actor_name"],
+                )
+                await pipeline.handle_history(msg)
+            print(f"history-only: backfilled {len(rows)} issue_changes rows.")
+            return
+
         if args.truncate_first:
             await vec_pool.execute("TRUNCATE chunks")
             print("cleared existing chunks table\n")
@@ -302,6 +363,9 @@ async def main() -> None:
                     parent_issue_id=row["parent_id"],
                     parent_key=row["parent_key"],
                     parent_title=row["parent_title"],
+                    assignee_id=row["assignee_id"],
+                    assignee_name=row["assignee_name"],
+                    story_points=row["story_points"],
                 )
                 await pipeline.handle_issue(msg)
 
@@ -319,6 +383,26 @@ async def main() -> None:
                     content=row["content"],
                 )
                 await pipeline.handle_comment(msg)
+
+            history = await _fetch_history(jira_pool, space_ids)
+            print(f"backfilling {len(history)} issue_changes...")
+            for row in history:
+                msg = IssueHistoryIngestionMessage(
+                    event_id=str(uuid.uuid4()),
+                    event_type="issue_history_added",
+                    emitted_at=row["created_at"] or datetime.now(timezone.utc),
+                    history_id=row["id"],
+                    issue_id=row["issue_id"],
+                    issue_key=row["issue_key"],
+                    space_id=row["space_id"],
+                    change_event_type=row["event_type"],
+                    field_name=row["field_name"],
+                    from_value=row["from_value"],
+                    to_value=row["to_value"],
+                    description=row["description"],
+                    actor_name=row["actor_name"],
+                )
+                await pipeline.handle_history(msg)
 
         if args.include_attachments and not args.sprints_only:
             attachment_bucket = os.environ.get("JIRA_ATTACHMENT_BUCKET", "jira-attachments")

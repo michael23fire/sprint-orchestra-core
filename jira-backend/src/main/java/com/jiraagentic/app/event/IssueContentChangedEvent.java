@@ -49,6 +49,9 @@ public record IssueContentChangedEvent(
         Long parentId,
         String parentKey,
         String parentTitle,
+        Long assigneeId,
+        String assigneeName,
+        Integer storyPoints,
         Instant createdAt,
         Instant updatedAt,
         Instant occurredAt

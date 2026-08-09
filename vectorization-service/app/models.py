@@ -49,6 +49,13 @@ class IssueIngestionMessage(_CamelModel):
     parent_issue_id: Optional[int] = None
     parent_key: Optional[str] = None
     parent_title: Optional[str] = None
+    # Who owns the ticket and how big it is — see migrations/012 for why these were added. Both are
+    # legitimately null (unassigned / unestimated are real states, not missing data), and both are
+    # carried on the upsert for the same reason `priority` is: they're usually set at creation and a
+    # history-only sync would never observe that initial value.
+    assignee_id: Optional[int] = None
+    assignee_name: Optional[str] = None
+    story_points: Optional[int] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -200,6 +207,10 @@ class IssueMetadata:
     # queryable "is X actually the parent of these subtasks" fact, not guessed from prose. See
     # docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 17.
     parent_key: Optional[str] = None
+    # See migrations/012. Nullable because unassigned/unestimated are real states.
+    assignee_id: Optional[int] = None
+    assignee_name: Optional[str] = None
+    story_points: Optional[int] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -218,6 +229,9 @@ class IssueRow:
     sprint_name: Optional[str]
     title: Optional[str]
     parent_key: Optional[str]
+    assignee_id: Optional[int]
+    assignee_name: Optional[str]
+    story_points: Optional[int]
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
 

@@ -233,6 +233,9 @@ class IssueRowOut(BaseModel):
     sprint_name: Optional[str]
     title: Optional[str]
     parent_key: Optional[str]
+    assignee_id: Optional[int]
+    assignee_name: Optional[str]
+    story_points: Optional[int]
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
 

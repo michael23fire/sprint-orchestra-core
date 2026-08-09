@@ -91,8 +91,18 @@ app:
       topic: ${APP_KAFKA_ATTACHMENT_INGESTION_TOPIC:jira.attachment.ingestion}
     # Publish after issue/comment create/update/delete (after DB commit). Consumed by the
     # vectorization-service for RAG ingestion (chunk -> embed -> upsert into pgvector).
+    #
+    # **Found live, not hypothetically**: this defaulted to `false` while attachment-ingestion above
+    # defaults to `true` -- an inconsistency, not a deliberate choice (nothing in this codebase ever
+    # explains why content sync would be opt-in when it's the pipeline every other RAG feature and
+    # sprint-recovery's real-time Kafka reevaluation trigger (app/sprint_recovery/kafka_trigger.py)
+    # actually depend on). With it left at the default, this dev instance silently ran for a long time
+    # with jira-backend writes never reaching vectorization-service's index at all -- every content
+    # change needed a manual backfill script to become visible, indistinguishable from a real
+    # regression. Defaulting to `true`, matching attachment-ingestion, so a fresh checkout/deploy has
+    # working sync out of the box; the env var still lets an operator turn it off deliberately.
     content-ingestion:
-      enabled: ${APP_KAFKA_CONTENT_INGESTION_ENABLED:false}
+      enabled: ${APP_KAFKA_CONTENT_INGESTION_ENABLED:true}
       topic: ${APP_KAFKA_CONTENT_INGESTION_TOPIC:jira.content.ingestion}
 
   # GitHub OAuth. Set GITHUB_OAUTH_ENABLED=true and OAuth app credentials from GitHub Developer settings.

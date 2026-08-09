@@ -157,25 +157,29 @@ class VectorStore:
             """
             INSERT INTO issues
                 (issue_id, issue_key, space_id, issue_type, status, priority, sprint_id, sprint_name,
-                 title, parent_key, created_at, updated_at, ingested_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+                 title, parent_key, assignee_id, assignee_name, story_points, created_at, updated_at,
+                 ingested_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
             ON CONFLICT (issue_id) DO UPDATE SET
-                issue_key   = EXCLUDED.issue_key,
-                space_id    = EXCLUDED.space_id,
-                issue_type  = EXCLUDED.issue_type,
-                status      = EXCLUDED.status,
-                priority    = EXCLUDED.priority,
-                sprint_id   = EXCLUDED.sprint_id,
-                sprint_name = EXCLUDED.sprint_name,
-                title       = EXCLUDED.title,
-                parent_key  = EXCLUDED.parent_key,
-                created_at  = EXCLUDED.created_at,
-                updated_at  = EXCLUDED.updated_at,
-                ingested_at = now()
+                issue_key     = EXCLUDED.issue_key,
+                space_id      = EXCLUDED.space_id,
+                issue_type    = EXCLUDED.issue_type,
+                status        = EXCLUDED.status,
+                priority      = EXCLUDED.priority,
+                sprint_id     = EXCLUDED.sprint_id,
+                sprint_name   = EXCLUDED.sprint_name,
+                title         = EXCLUDED.title,
+                parent_key    = EXCLUDED.parent_key,
+                assignee_id   = EXCLUDED.assignee_id,
+                assignee_name = EXCLUDED.assignee_name,
+                story_points  = EXCLUDED.story_points,
+                created_at    = EXCLUDED.created_at,
+                updated_at    = EXCLUDED.updated_at,
+                ingested_at   = now()
             """,
             meta.issue_id, meta.issue_key, meta.space_id, meta.issue_type, meta.status, meta.priority,
-            meta.sprint_id, meta.sprint_name, meta.title, meta.parent_key, meta.created_at,
-            meta.updated_at,
+            meta.sprint_id, meta.sprint_name, meta.title, meta.parent_key, meta.assignee_id,
+            meta.assignee_name, meta.story_points, meta.created_at, meta.updated_at,
         )
 
     async def upsert_sprint(self, meta: SprintMetadata) -> None:
@@ -555,7 +559,7 @@ class VectorStore:
         rows = await self._pool.fetch(
             f"""
             SELECT issue_id, issue_key, space_id, issue_type, status, priority, sprint_id, sprint_name,
-                   title, parent_key, created_at, updated_at
+                   title, parent_key, assignee_id, assignee_name, story_points, created_at, updated_at
             FROM issues WHERE {where}
             ORDER BY {order_col} {direction} NULLS LAST, issue_id {direction}
             LIMIT ${len(args) + 1}
@@ -571,7 +575,9 @@ class VectorStore:
                     issue_id=r["issue_id"], issue_key=r["issue_key"], space_id=r["space_id"],
                     issue_type=r["issue_type"], status=r["status"], priority=r["priority"],
                     sprint_id=r["sprint_id"], sprint_name=r["sprint_name"], title=r["title"],
-                    parent_key=r["parent_key"], created_at=r["created_at"], updated_at=r["updated_at"],
+                    parent_key=r["parent_key"], assignee_id=r["assignee_id"],
+                    assignee_name=r["assignee_name"], story_points=r["story_points"],
+                    created_at=r["created_at"], updated_at=r["updated_at"],
                 )
                 for r in rows
             ],
