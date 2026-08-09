@@ -18,6 +18,7 @@ from pydantic.alias_generators import to_camel
 
 from app.api.routes import _authorize_space_ids, _authorize_workflow_state, _caller_identity
 from app.observability import SPRINT_RECOVERY_INDEX_CATCH_UP_TIMEOUTS_TOTAL
+from app.sprint_recovery.active_threads import find_active_thread_id, register_active_thread
 from app.sprint_recovery.graph import (
     ON_STAGE_VAR,
     _describe_action,
@@ -45,6 +46,20 @@ def _graph(request: Request):
     if graph is None:
         raise HTTPException(status_code=503, detail="sprint recovery is disabled (AI_SPRINT_RECOVERY_ENABLED=false)")
     return graph
+
+
+async def _register_active_thread_if_configured(request: Request, space_id: int, sprint_id: int, thread_id: str) -> None:
+    """Best-effort: a failure here must never break starting a real check over a side table that only
+    exists to make *finding* it again more convenient. Registered before the graph even runs its first
+    diagnosis, deliberately — see active_threads.py's own docstring on why early registration, not just
+    convenient, matters for crash-resume to actually be discoverable."""
+    db_url = getattr(request.app.state, "sprint_recovery_checkpoint_db_url", None)
+    if not db_url:
+        return
+    try:
+        await register_active_thread(db_url, space_id, sprint_id, thread_id)
+    except Exception:  # noqa: BLE001 - see docstring
+        logger.exception("failed to register active sprint-recovery thread (space=%s, sprint=%s)", space_id, sprint_id)
 
 
 def _register_if_waiting(request: Request, sprint_id: int, thread_id: str, values: dict) -> None:
@@ -291,6 +306,7 @@ async def start_recovery_endpoint(req: StartRecoveryRequest, request: Request) -
     graph = _graph(request)
     user_id, username = _caller_identity(request)
     thread_id = str(uuid.uuid4())
+    await _register_active_thread_if_configured(request, req.space_id, req.sprint_id, thread_id)
     settings = request.app.state.settings
     initial = initial_recovery_state(
         req.space_id, req.sprint_id, req.sprint_name, user_id, username,
@@ -315,6 +331,7 @@ async def start_recovery_stream_endpoint(req: StartRecoveryRequest, request: Req
     graph = _graph(request)
     user_id, username = _caller_identity(request)
     thread_id = str(uuid.uuid4())
+    await _register_active_thread_if_configured(request, req.space_id, req.sprint_id, thread_id)
     settings = request.app.state.settings
     initial = initial_recovery_state(
         req.space_id, req.sprint_id, req.sprint_name, user_id, username,
@@ -337,6 +354,39 @@ async def start_recovery_stream_endpoint(req: StartRecoveryRequest, request: Req
         yield _sse("result", _status_response(thread_id, snap.values).model_dump(by_alias=True))
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# Statuses a caller should never be silently resumed into — there's nothing left to do, so `/by-sprint`
+# treats these the same as "no active thread" rather than forcing every reopen to stare at old history.
+# `_status_response_with_summary`'s escalation-summary/history views remain reachable directly by
+# thread_id for anyone who wants to review a finished run — this only gates the *automatic* resume.
+_TERMINAL_STATUSES = {"recovered", "escalated", "rejected", "no_risk_found"}
+
+
+@router.get("/by-sprint", response_model=Optional[RecoveryStatusResponse])
+async def find_active_recovery_endpoint(space_id: int, sprint_id: int, request: Request) -> Optional[RecoveryStatusResponse]:
+    """**Found live, from a direct product question**: crash-resume was verified correct at the graph
+    level (same thread_id, `/retry` picks up exactly where a killed process left off) — but the
+    frontend had no way to *discover* that thread_id after losing it from browser memory (modal closed,
+    page reloaded, or the crash itself). `handleStart` always called `POST /start`, which always mints
+    a fresh thread; every other endpoint requires already knowing thread_id. The checkpoint was never
+    actually lost, nothing could find it again. Called on mount, before offering "Analyze Sprint
+    Health" — if this finds a non-terminal thread, the frontend resumes showing it directly instead of
+    starting over. Registered in `active_threads.py`, not in `state["risk_signals"]`/etc: the
+    checkpointer's own tables have no `space_id`/`sprint_id` columns to query by.
+    """
+    await _authorize_space_ids(request, [space_id])
+    db_url = getattr(request.app.state, "sprint_recovery_checkpoint_db_url", None)
+    if not db_url:
+        return None
+    thread_id = await find_active_thread_id(db_url, space_id, sprint_id)
+    if not thread_id:
+        return None
+    graph = _graph(request)
+    snap = await graph.aget_state({"configurable": {"thread_id": thread_id}})
+    if not snap.values or snap.values.get("status") in _TERMINAL_STATUSES:
+        return None
+    return await _status_response_with_summary(thread_id, snap.values, graph)
 
 
 @router.get("/{thread_id}", response_model=RecoveryStatusResponse)

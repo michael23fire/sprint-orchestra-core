@@ -28,6 +28,7 @@ from app.planning.checkpoint import build_checkpointer
 from app.planning.graph import build_planning_graph
 from app.planning.jira_commit_client import JiraCommitClient
 from app.planning.rollout_graph import build_rollout_graph
+from app.sprint_recovery.active_threads import ensure_active_threads_table
 from app.sprint_recovery.graph import build_sprint_recovery_graph
 from app.sprint_recovery.jira_actions_client import JiraActionsClient
 from app.sprint_recovery.kafka_trigger import SprintRecoveryKafkaTrigger
@@ -116,6 +117,12 @@ async def lifespan(app: FastAPI):
         sprint_recovery_graph = build_sprint_recovery_graph(
             instructor_client, instructor_model, space_membership, retrieval, jira_actions_client,
         ).compile(checkpointer=checkpointer)
+        # See active_threads.py's own docstring: the checkpointer itself has no way to look up "the
+        # thread for sprint X" — this is the one small side table that makes crash-resume something a
+        # human can actually find their way back to through the UI, not just something the graph can
+        # technically resume if you already have the thread_id.
+        if checkpoint_db_url is not None:
+            await ensure_active_threads_table(checkpoint_db_url)
         if settings.sprint_recovery_kafka_enabled:
             sprint_recovery_kafka_trigger = SprintRecoveryKafkaTrigger(
                 settings.kafka_bootstrap_servers, settings.kafka_content_topic,
@@ -137,6 +144,7 @@ async def lifespan(app: FastAPI):
     app.state.rollout_graph = rollout_graph
     app.state.sprint_recovery_graph = sprint_recovery_graph
     app.state.sprint_recovery_kafka_trigger = sprint_recovery_kafka_trigger
+    app.state.sprint_recovery_checkpoint_db_url = checkpoint_db_url
 
     try:
         yield
