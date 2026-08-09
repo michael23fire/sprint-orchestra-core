@@ -304,12 +304,24 @@ async def _await_index_catch_up(retrieval, space_id: int, sprint_id: int, waterm
         return True
     deadline = time.monotonic() + _INDEX_CATCH_UP_TIMEOUT_SECONDS
     while True:
-        result = await retrieval.query_issues([space_id], {"sprint_ids": [sprint_id], "limit": 200})
-        indexed = {row["issue_key"]: row.get("updated_at") for row in result.issues}
-        if all(
-            key not in indexed or _is_at_least(_parse_ts(indexed.get(key)), _parse_ts(expected))
-            for key, expected in watermarks.items()
-        ):
+        try:
+            result = await retrieval.query_issues([space_id], {"sprint_ids": [sprint_id], "limit": 200})
+            indexed = {row["issue_key"]: row.get("updated_at") for row in result.issues}
+            caught_up = all(
+                key not in indexed or _is_at_least(_parse_ts(indexed.get(key)), _parse_ts(expected))
+                for key, expected in watermarks.items()
+            )
+        except Exception:  # noqa: BLE001 - a single flaky poll must not abort a wait that has up to
+            # `_INDEX_CATCH_UP_TIMEOUT_SECONDS` of budget left to try again; if vectorization-service is
+            # genuinely unreachable rather than just having dropped one request, every subsequent poll
+            # fails the same way and the timeout below still bounds how long this waits before giving up
+            # — the very next `_detect_risk_signals` call is what actually surfaces a sustained outage.
+            logger.warning(
+                "sprint-recovery index catch-up poll failed, retrying within the timeout budget",
+                exc_info=True, extra={"space_id": space_id, "sprint_id": sprint_id},
+            )
+            caught_up = False
+        if caught_up:
             return True
         if time.monotonic() >= deadline:
             logger.warning(

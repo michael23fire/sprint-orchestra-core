@@ -1242,3 +1242,25 @@ async def test_commit_records_the_pre_write_timestamp_once_and_keeps_the_origina
     pre = snap.values["pre_write_updated_at"]
     assert set(pre) == {"PAY-142", "PAY-97"}  # one per action target in plan_a
     assert all(v == "2026-08-09T00:00:00Z" for v in pre.values())
+
+
+async def test_index_catch_up_survives_a_transient_poll_failure_instead_of_crashing():
+    """**Found in review**: the polling loop's `query_issues` call wasn't guarded — before this, the
+    single call `_detect_risk_signals` used to make had a small failure window, but polling up to ~40
+    times over the timeout budget meaningfully widened it. A single flaky request must not abort a
+    wait that still has time budget left; it should just count as "not caught up yet" and retry.
+    """
+    calls = {"n": 0}
+
+    class _FlakyThenFineRetrieval(FakeRetrieval):
+        async def query_issues(self, space_ids, filters):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ConnectionError("simulated transient vectorization-service blip")
+            return await super().query_issues(space_ids, filters)
+
+    retrieval = _FlakyThenFineRetrieval(issue_rows=[])  # empty -> the watched issue has left the sprint
+    caught_up = await _await_index_catch_up(retrieval, 5000014, 7, {"PAY-142": "2026-08-05T00:00:00Z"})
+
+    assert caught_up is True
+    assert calls["n"] == 2  # failed once, succeeded on retry — never raised out of the function
