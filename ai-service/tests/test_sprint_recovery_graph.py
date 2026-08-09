@@ -6,24 +6,39 @@ actions client (mirrors JiraActionsClient). InMemorySaver for fast mechanism tes
 `test_crash_mid_commit_resumes_without_duplicate_actions` uses a real AsyncPostgresSaver, same
 reasoning as `tests/test_rollout_graph.py`'s crash test.
 """
+import asyncio
 import uuid
+from datetime import date, datetime, timedelta, timezone
+from unittest.mock import patch
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from app.auth.space_membership import NoopSpaceMembershipChecker, SpaceMembershipError
+from app.sprint_recovery import graph as graph_module
 from app.sprint_recovery.graph import (
+    _await_index_catch_up,
+    _describe_action,
+    _detect_risk_signals,
     _gather_evidence,
     build_escalation_summary,
     build_sprint_recovery_graph,
+    flatten_escalation_summary,
     list_checkpoint_history,
+    reevaluate_node,
     retry_recovery_commit,
     time_travel_resume,
     trigger_reevaluation,
 )
 from app.sprint_recovery.jira_actions_client import JiraActionError
-from app.sprint_recovery.schemas import DiagnosisResult, RecoveryAction, RecoveryPlan, RecoveryPlanSet, RootCauseHypothesis
+from app.sprint_recovery.schemas import (
+    DiagnosisResult,
+    RecoveryAction,
+    RecoveryPlan,
+    RecoveryPlanSet,
+    RootCauseHypothesis,
+)
 from app.sprint_recovery.state import initial_recovery_state
 from tests.test_planning import FakeInstructorClient
 
@@ -34,8 +49,9 @@ class FakeRetrieval:
     (e.g. to simulate "the sprint improved after actions were committed").
     """
 
-    def __init__(self, issue_rows=None, comments=None, details=None, attachments=None, history=None):
+    def __init__(self, issue_rows=None, comments=None, details=None, attachments=None, history=None, sprints=None):
         self.issue_rows = issue_rows if issue_rows is not None else []
+        self.sprints = sprints if sprints is not None else []
         # Default mentions PAY-97 in free text (not as its own flagged risk row) — every fixture that
         # doesn't override this exercises the realistic "undocumented dependency mentioned in a
         # comment, never independently flagged" case plan_node's issue-key extraction needs to handle.
@@ -67,15 +83,26 @@ class FakeRetrieval:
     async def get_issue_attachments(self, space_ids, issue_keys, limit=200):
         return type("R", (), {"total_count": len(self.attachments), "attachments": self.attachments})()
 
+    async def query_sprints(self, space_ids, filters):
+        return type("R", (), {"total_count": len(self.sprints), "sprints": self.sprints})()
+
 
 class FakeJiraActions:
-    def __init__(self, fail_on_call: int = None, raise_type=JiraActionError):
+    def __init__(self, fail_on_call: int = None, raise_type=JiraActionError, updated_at=None):
         self.calls = []
+        self.idempotency_keys = []
         self._fail_on_call = fail_on_call
         self._raise_type = raise_type
+        # None => no watermark recorded, so `_await_index_catch_up` has nothing to wait on. Tests that
+        # care about the catch-up wait set this explicitly.
+        self._updated_at = updated_at
 
-    async def execute(self, space_id, action, user_id, username):
+    async def issue_updated_at(self, space_id, issue_key, user_id, username):
+        return self._updated_at
+
+    async def execute(self, space_id, action, user_id, username, idempotency_key=None):
         self.calls.append((action.action_type, action.target_issue_key))
+        self.idempotency_keys.append(idempotency_key)
         if self._fail_on_call is not None and len(self.calls) == self._fail_on_call:
             raise self._raise_type(f"simulated failure on call {len(self.calls)}")
         return f"{action.action_type} on {action.target_issue_key} done"
@@ -83,6 +110,10 @@ class FakeJiraActions:
 
 _AT_RISK_ROWS = [{"issue_key": "PAY-142", "status": "in_progress", "updated_at": "2026-07-20T00:00:00Z"}]
 _HEALTHY_ROWS = [{"issue_key": "PAY-142", "status": "done", "updated_at": "2026-08-01T00:00:00Z"}] * 8
+_AT_RISK_TWO_ISSUES_ROWS = [
+    {"issue_key": "PAY-142", "status": "in_progress", "updated_at": "2026-07-20T00:00:00Z"},
+    {"issue_key": "PAY-99", "status": "in_progress", "updated_at": "2026-07-20T00:00:00Z"},
+]
 
 
 def _hyp(evidence_ids, confidence="high"):
@@ -380,9 +411,65 @@ async def test_build_escalation_summary_covers_every_round_and_the_final_risk_re
     assert final["status"] == "escalated"
 
     summary = await build_escalation_summary(graph, thread_id)
-    assert "Round 1" in summary and "Unblock via dependency" in summary
-    assert "Round 2" in summary and "Escalate to a second engineer" in summary
-    assert "Still at risk because" in summary
+    assert [r["round"] for r in summary["rounds"]] == [1, 2]
+    assert summary["rounds"][0]["plan_name"] == "Unblock via dependency"
+    assert summary["rounds"][1]["plan_name"] == "Escalate to a second engineer"
+    assert summary["still_at_risk_reasons"]
+
+    # Each action must be auditable on its own terms — a human reading this handoff has to see what
+    # was actually written to Jira, not just that *something* was. Found live: the round-2 entry read
+    # "comment added to PAY-142", which never showed the reviewer the comment's text.
+    assert summary["rounds"][0]["actions"] == [
+        "Marked PAY-142 as blocked by PAY-97", "Raised PAY-97 priority to highest",
+    ]
+    assert summary["rounds"][1]["actions"] == ['Commented on PAY-142: "pairing"']
+
+    # PAY-142 (the only flagged issue here) was acted on in both rounds — a focused handoff, not an
+    # unresolved one. See test_build_escalation_summary_flags_issues_that_were_never_attempted below
+    # for the other case.
+    assert summary["unaddressed_issue_keys"] == []
+
+    flat = flatten_escalation_summary(summary)
+    assert "Round 1" in flat and "Unblock via dependency" in flat
+    assert "Round 2" in flat and "Escalate to a second engineer" in flat
+    assert "Still at risk because" in flat
+    assert "Never got attempted" not in flat
+
+
+async def test_build_escalation_summary_flags_issues_that_were_never_attempted():
+    """Distinguishes a 'focused' handoff (every flagged issue was acted on at least once) from an
+    unresolved one — see `build_escalation_summary`'s docstring. PAY-99 is flagged at every risk check
+    here but no plan across either round ever targets it, only PAY-142.
+    """
+    diagnosis = DiagnosisResult(hypotheses=[_hyp(["ev1"])], overall_confidence="sufficient")
+    retrieval = FakeRetrieval(issue_rows=list(_AT_RISK_TWO_ISSUES_ROWS))  # never improves
+    jira = FakeJiraActions()
+    plan_round_0 = RecoveryPlanSet(plans=[RecoveryPlan(
+        plan_id="plan_a", name="Unblock PAY-142", rationale="r", impact_on_goal="keeps goal",
+        actions=[RecoveryAction(action_type="change_priority", target_issue_key="PAY-142", new_priority="highest")],
+    )])
+    plan_round_1 = RecoveryPlanSet(plans=[RecoveryPlan(
+        plan_id="plan_a", name="Comment on PAY-142 again", rationale="round 0 plan did not resolve it",
+        impact_on_goal="keeps goal",
+        actions=[RecoveryAction(action_type="add_comment", target_issue_key="PAY-142", comment_body="status?")],
+    )])
+    client = FakeInstructorClient({DiagnosisResult: [diagnosis], RecoveryPlanSet: [plan_round_0, plan_round_1]})
+    graph = _graph(client, retrieval, jira)
+    cfg = _cfg()
+    thread_id = cfg["configurable"]["thread_id"]
+
+    await graph.ainvoke(_state(), config=cfg)
+    await graph.ainvoke(Command(resume={"decision": "approve", "plan_id": "plan_a"}), config=cfg)
+    await trigger_reevaluation(graph, thread_id, source="manual")
+    await graph.ainvoke(Command(resume={"decision": "approve", "plan_id": "plan_a"}), config=cfg)
+    final = await trigger_reevaluation(graph, thread_id, source="manual")
+    assert final["status"] == "escalated"
+
+    summary = await build_escalation_summary(graph, thread_id)
+    assert summary["unaddressed_issue_keys"] == ["PAY-99"]
+
+    flat = flatten_escalation_summary(summary)
+    assert "Never got attempted: PAY-99" in flat
 
 
 async def test_token_budget_exhausted_before_diagnosis_fails_cleanly():
@@ -414,6 +501,82 @@ async def test_action_failure_mid_commit_then_retry_recovery_commit_finishes():
     assert "__interrupt__" in result  # reached wait_for_reevaluation
     assert len(result["committed_actions"]) == 2
     assert jira.calls == [("link_dependency", "PAY-142"), ("change_priority", "PAY-97"), ("change_priority", "PAY-97")]
+    # **Found live**: the failed attempt and the retry both act on the same (thread, round, action index)
+    # — jira-backend's IdempotencyFilter can only recognize the retry as a repeat if the key is identical
+    # both times, not freshly generated per call.
+    assert jira.idempotency_keys[1] == jira.idempotency_keys[2]
+    assert jira.idempotency_keys[0] != jira.idempotency_keys[1]  # different action index, different key
+
+
+async def test_pre_write_baseline_survives_a_failed_attempt_instead_of_being_recomputed_on_retry():
+    """**Found live in review**: a failed attempt used to return without `pre_write_updated_at`,
+    discarding the baseline it had already captured. Harmless on a clean failure — but if the write
+    actually succeeded server-side and only the client saw a timeout (exactly what the idempotency key
+    exists for), a retry's baseline GET would run *after* that write landed, silently reintroducing the
+    false-`recovered` bug through the retry path. The baseline from the first attempt must win, not
+    whatever a later GET happens to see.
+    """
+    # PAY-142's *first ever* read (the failed attempt's baseline) must be the one that survives — every
+    # later read for it (a watermark read after a successful retry, or a skipped-baseline re-read that
+    # never should happen) is deliberately a different value, so the test would catch either one leaking
+    # into the baseline.
+    reads_by_key = {"PAY-142": iter(["2026-08-01T00:00:00Z", "2026-08-09T12:00:00Z", "2026-08-09T12:00:01Z"])}
+
+    class _DriftingJira(FakeJiraActions):
+        async def issue_updated_at(self, space_id, issue_key, user_id, username):
+            seq = reads_by_key.setdefault(issue_key, iter([]))
+            return next(seq, "2026-08-09T09:00:00Z")  # generic fallback for PAY-97's baseline/watermark
+
+    diagnosis = DiagnosisResult(hypotheses=[_hyp(["ev1"])], overall_confidence="sufficient")
+    retrieval = FakeRetrieval(issue_rows=list(_AT_RISK_ROWS))
+    jira = _DriftingJira(fail_on_call=1)  # the very first action fails
+    graph = _graph(_client(diagnosis, _plan_set()), retrieval, jira)
+    cfg = _cfg()
+    thread_id = cfg["configurable"]["thread_id"]
+
+    await graph.ainvoke(_state(), config=cfg)
+    failed = await graph.ainvoke(Command(resume={"decision": "approve", "plan_id": "plan_a"}), config=cfg)
+    assert failed["status"] == "failed"
+    assert failed["pre_write_updated_at"] == {"PAY-142": "2026-08-01T00:00:00Z"}
+
+    result = await retry_recovery_commit(graph, thread_id)
+    assert "__interrupt__" in result
+    # Still the first (pre-attempt) baseline — NOT the second GET's later timestamp, which a retry that
+    # recomputed from scratch would have picked up instead.
+    assert result["pre_write_updated_at"]["PAY-142"] == "2026-08-01T00:00:00Z"
+
+
+async def test_retry_after_plan_generation_failure_reenters_plan_instead_of_crashing():
+    """Found live: `status="failed"` can happen *before* any plan was ever approved (here,
+    `_validate_plan_issue_keys` rejects every action in the only proposed plan) — not just mid-commit.
+    The original `retry_recovery_commit` only handled the mid-commit case; retrying this one re-armed
+    `commit_one_action_node`, which unconditionally reads `state["approved_plan"].actions` and would
+    crash on the `None` left behind here. Retry must detect "no plan was ever approved" and re-enter
+    `plan` instead.
+    """
+    diagnosis = DiagnosisResult(hypotheses=[_hyp(["ev1"])], overall_confidence="sufficient")
+    bogus_plans = RecoveryPlanSet(plans=[
+        RecoveryPlan(plan_id="plan_x", name="Bogus", rationale="r", impact_on_goal="n/a", actions=[
+            RecoveryAction(action_type="add_comment", target_issue_key="ZZZ-999", comment_body="not a real issue"),
+        ]),
+    ])
+    client = FakeInstructorClient({DiagnosisResult: [diagnosis], RecoveryPlanSet: [bogus_plans, _plan_set()]})
+    retrieval = FakeRetrieval(issue_rows=list(_AT_RISK_ROWS))
+    graph = _graph(client, retrieval, FakeJiraActions())
+    cfg = _cfg()
+    thread_id = cfg["configurable"]["thread_id"]
+
+    failed = await graph.ainvoke(_state(), config=cfg)
+    assert failed["status"] == "failed"
+    assert "invalid/unknown issue keys" in failed["error"]
+    assert failed.get("approved_plan") is None
+
+    result = await retry_recovery_commit(graph, thread_id)  # must not crash on approved_plan=None
+    assert "__interrupt__" in result  # reached awaiting_plan_approval again, this time with valid plans
+
+    snap = await graph.aget_state(cfg)
+    assert snap.values["status"] == "awaiting_plan_approval"
+    assert len(snap.values["plans"]) == 2
 
 
 async def test_time_travel_rewinds_to_post_diagnosis_checkpoint_and_produces_new_plans():
@@ -516,3 +679,566 @@ async def test_crash_mid_commit_resumes_without_duplicate_actions():
                 await conn.execute(
                     f"DELETE FROM planning_workflows.{table} WHERE thread_id = %s", (thread_id,)
                 )
+
+
+async def test_healthy_sprint_short_circuits_to_no_risk_found_without_calling_the_llm():
+    """Found live against all 7 real AtlasCart sprints: a sprint with zero deterministic risk signals
+    still went to the LLM with an empty prompt, which came back overall_confidence='insufficient' and
+    asked the *user* "what risk signals were gathered for this sprint?" — the model asking a human to
+    supply the data the system gathers for itself. `diagnose_node` now answers that structurally.
+    """
+    client = _client(DiagnosisResult(hypotheses=[], overall_confidence="sufficient"), _plan_set())
+    retrieval = FakeRetrieval(issue_rows=list(_HEALTHY_ROWS))  # all done -> no signals fire
+    graph = _graph(client, retrieval, FakeJiraActions())
+
+    result = await graph.ainvoke(_state(), config=_cfg())
+
+    assert result["status"] == "no_risk_found"
+    assert result["risk_signals"] == []
+    assert result["clarification_question"] is None
+    # The whole point: no LLM call was made at all, so no clarifying question could be invented.
+    assert client.completions.calls == []
+
+
+async def test_risk_signals_are_citable_evidence_so_hypotheses_can_be_grounded():
+    """A sprint-level signal (low_completion_forecast) carries no issue_key, so `_gather_evidence`
+    fetches nothing for it. Before signals were restated as evidence, the model was shown facts it was
+    structurally forbidden to cite — every hypothesis it produced then got dropped by
+    `_apply_grounding` for citing an unknown id, cascading into a bare plan-generation failure.
+    """
+    diagnosis = DiagnosisResult(hypotheses=[_hyp(["risk1"])], overall_confidence="sufficient")
+    # 1 issue, in_progress -> long_in_progress fires; 0 done of 1 -> low_completion_forecast fires too.
+    retrieval = FakeRetrieval(issue_rows=list(_AT_RISK_ROWS), comments=[], details=[], history=[])
+    graph = _graph(_client(diagnosis, _plan_set()), retrieval, FakeJiraActions())
+
+    result = await graph.ainvoke(_state(), config=_cfg())
+
+    signal_evidence = [e for e in result["evidence"] if e.source_type == "risk_signal"]
+    assert signal_evidence, "every deterministic risk signal must be restated as citable evidence"
+    assert {e.citation_id for e in signal_evidence} >= {"risk1"}
+    # A hypothesis citing risk1 survives grounding instead of being silently discarded.
+    assert len(result["hypotheses"]) == 1
+
+
+async def test_sprint_level_risk_is_planned_directly_using_the_sprint_roster():
+    """Sprint-level risk (nothing started, no single broken ticket) used to hand straight off to a
+    human with nothing attached, because `plan_node` only ever knew about issues that had
+    independently tripped a per-issue signal — a signal with no issue_key (like the sprint-wide
+    completion forecast) left it with literally no legal target. The sprint snapshot (see
+    `_build_sprint_snapshot`) widens `known_issue_keys` to the whole roster, so a plan can still act on
+    an issue that never tripped a signal of its own.
+    """
+    diagnosis = DiagnosisResult(hypotheses=[_hyp(["risk1"])], overall_confidence="sufficient")
+    plan_set = RecoveryPlanSet(plans=[RecoveryPlan(
+        plan_id="plan_a", name="Move non-critical scope out", rationale="protects the goal",
+        impact_on_goal="protects the goal",
+        actions=[RecoveryAction(action_type="move_out_of_sprint", target_issue_key="PAY-1")],
+    )])
+    # `planned` never trips a per-issue signal, so the only signal is the sprint-level forecast —
+    # which carries no issue_key. Previously that meant "nothing to act on".
+    planned_rows = [{"issue_key": "PAY-1", "status": "planned", "updated_at": "2026-07-20T00:00:00Z"}]
+    retrieval = FakeRetrieval(issue_rows=planned_rows, comments=[], details=[], history=[])
+    client = FakeInstructorClient({DiagnosisResult: [diagnosis], RecoveryPlanSet: [plan_set]})
+    graph = _graph(client, retrieval, FakeJiraActions())
+
+    result = await graph.ainvoke(_state(), config=_cfg())
+
+    assert result["status"] == "awaiting_plan_approval"
+    # PAY-1 never tripped a per-issue signal — it is actionable purely because the snapshot carried it.
+    assert result["plans"][0].actions[0].target_issue_key == "PAY-1"
+    assert [i.issue_key for i in result["sprint_snapshot"].issues] == ["PAY-1"]
+
+
+async def test_blocked_status_fires_its_own_signal_not_just_the_sprint_level_forecast():
+    """Found live: `blocked` is a first-class status in the board's own type system, but
+    `_detect_risk_signals` only ever checked for `in_progress` — a genuinely blocked issue tripped no
+    per-issue signal at all, only the sprint-level completion forecast. That pushed real "blocked"
+    situations to look identical to the "nothing is attributable to any one issue" handoff case, and
+    forced demo data to lie (status=in_progress on an issue whose own description said "blocked") just
+    to make a per-issue signal fire.
+    """
+    retrieval = FakeRetrieval(issue_rows=[
+        {"issue_key": "PAY-1", "status": "blocked", "updated_at": "2026-07-20T00:00:00Z"},
+    ])
+    signals = await _detect_risk_signals(retrieval, 5000014, 7)
+    assert len(signals) == 2  # blocked_no_flag (per-issue) + low_completion_forecast (sprint-level)
+    per_issue = [s for s in signals if s.signal_type == "blocked_no_flag"]
+    assert len(per_issue) == 1
+    assert per_issue[0].issue_key == "PAY-1"
+
+
+async def test_in_progress_signal_requires_actual_staleness_not_just_the_status():
+    """Direct product feedback: "can the system tell if an owner just isn't updating their ticket?"
+    Before this, `long_in_progress` fired on ANY in_progress issue regardless of how long it had sat
+    there — a ticket that moved to in_progress five minutes ago looked exactly as risky as one
+    untouched for two weeks. Now it requires real staleness (`_STALE_AFTER_DAYS`).
+    """
+    # Companion "done" rows keep the sprint-level completion forecast (no end_date here, so it uses
+    # the flat 70% cutoff) out of the way, so only the per-issue staleness behavior under test can
+    # produce a signal either way.
+    companions = [{"issue_key": f"PAY-{i}", "status": "done", "updated_at": "2026-08-01T00:00:00Z"} for i in range(2, 6)]
+
+    fresh = FakeRetrieval(issue_rows=[
+        {"issue_key": "PAY-1", "status": "in_progress", "updated_at": datetime.now(timezone.utc).isoformat()},
+        *companions,
+    ])
+    assert await _detect_risk_signals(fresh, 5000014, 7) == []
+
+    stale = FakeRetrieval(issue_rows=[
+        {"issue_key": "PAY-1", "status": "in_progress", "updated_at": "2026-07-01T00:00:00Z"},
+        *companions,
+    ])
+    signals = await _detect_risk_signals(stale, 5000014, 7)
+    assert any(s.signal_type == "long_in_progress" and s.issue_key == "PAY-1" for s in signals)
+
+
+async def test_completion_forecast_gets_stricter_near_the_sprint_deadline():
+    """80% done reads completely differently on day 2 of a 10-day sprint than with 1 day left. The
+    flat 70% cutoff alone can't tell those apart; this adds a second, independent rule that only
+    engages once the sprint is nearly over.
+    """
+    rows_80pct = [{"issue_key": f"PAY-{i}", "status": "done", "updated_at": "x"} for i in range(8)] + [
+        {"issue_key": "PAY-9", "status": "planned", "updated_at": "x"},
+        {"issue_key": "PAY-10", "status": "planned", "updated_at": "x"},
+    ]
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    far_off = (date.today() + timedelta(days=20)).isoformat()
+
+    ending_soon = FakeRetrieval(
+        issue_rows=rows_80pct,
+        sprints=[{"sprint_id": 7, "end_date": tomorrow}],
+    )
+    signals = await _detect_risk_signals(ending_soon, 5000014, 7)
+    assert any(s.signal_type == "low_completion_forecast" for s in signals)  # 80% is not enough here
+
+    plenty_of_runway = FakeRetrieval(
+        issue_rows=rows_80pct,
+        sprints=[{"sprint_id": 7, "end_date": far_off}],
+    )
+    signals = await _detect_risk_signals(plenty_of_runway, 5000014, 7)
+    assert not any(s.signal_type == "low_completion_forecast" for s in signals)  # 80% is fine this early
+
+
+async def test_completion_forecast_is_suppressed_in_the_first_fifth_of_the_sprint():
+    """A sprint's completion forecast starts at 0% by definition on day 1 — without a grace period,
+    running a health check that early would flag "low completion" every single time, which isn't a
+    finding, it's just what day 1 looks like. Direct product question this answers: "wouldn't a real
+    PM only run this mid-sprint or later?" — yes, and this is what makes running it on day 1 harmless
+    instead of a guaranteed false positive.
+    """
+    zero_done = [{"issue_key": f"PAY-{i}", "status": "planned", "updated_at": "x"} for i in range(5)]
+    today = date.today()
+
+    day_one = FakeRetrieval(
+        issue_rows=zero_done,
+        sprints=[{"sprint_id": 7, "start_date": today.isoformat(), "end_date": (today + timedelta(days=10)).isoformat()}],
+    )
+    signals = await _detect_risk_signals(day_one, 5000014, 7)
+    assert not any(s.signal_type == "low_completion_forecast" for s in signals)  # too early to call this a finding
+
+    mid_sprint = FakeRetrieval(
+        issue_rows=zero_done,
+        sprints=[{"sprint_id": 7, "start_date": (today - timedelta(days=6)).isoformat(), "end_date": (today + timedelta(days=4)).isoformat()}],
+    )
+    signals = await _detect_risk_signals(mid_sprint, 5000014, 7)
+    assert any(s.signal_type == "low_completion_forecast" for s in signals)  # day 6 of 10, still 0% -> real finding
+
+
+def test_describe_action_names_every_action_type_in_plain_language():
+    """Locks in the plain-language rendering `build_escalation_summary` and the checkpoint-history
+    endpoint both depend on — including the full comment body, which the old `committed_actions`
+    result string ("comment added to X") never carried.
+    """
+    assert _describe_action(RecoveryAction(
+        action_type="add_comment", target_issue_key="PAY-1", comment_body="pairing another engineer",
+    )) == 'Commented on PAY-1: "pairing another engineer"'
+    assert _describe_action(RecoveryAction(
+        action_type="change_priority", target_issue_key="PAY-1", new_priority="highest",
+    )) == "Raised PAY-1 priority to highest"
+    assert _describe_action(RecoveryAction(
+        action_type="move_out_of_sprint", target_issue_key="PAY-1",
+    )) == "Moved PAY-1 out of the sprint"
+    assert _describe_action(RecoveryAction(
+        action_type="link_dependency", target_issue_key="PAY-1", depends_on_issue_key="PAY-97",
+    )) == "Marked PAY-1 as blocked by PAY-97"
+
+
+async def test_plan_prompt_lists_prior_round_actions_so_it_wont_repeat_a_no_op():
+    """Found live: escalation round 2 raised the same issue's priority to "highest" a second time —
+    a no-op, since it was already there from round 1 — because the prompt only said "the previous plan
+    didn't work" without ever saying what it actually did. This locks in that round 2's prompt now
+    names the concrete round-1 action.
+    """
+    diagnosis = DiagnosisResult(hypotheses=[_hyp(["risk1"])], overall_confidence="sufficient")
+    round0_plan = RecoveryPlanSet(plans=[RecoveryPlan(
+        plan_id="plan_a", name="Raise priority", rationale="r", impact_on_goal="visibility", actions=[
+            RecoveryAction(action_type="change_priority", target_issue_key="PAY-1", new_priority="highest"),
+        ],
+    )])
+    round1_plan = RecoveryPlanSet(plans=[RecoveryPlan(
+        plan_id="plan_a", name="Escalate further", rationale="r2", impact_on_goal="visibility", actions=[
+            RecoveryAction(action_type="add_comment", target_issue_key="PAY-1", comment_body="escalating"),
+        ],
+    )])
+    client = FakeInstructorClient({DiagnosisResult: [diagnosis], RecoveryPlanSet: [round0_plan, round1_plan]})
+    # Blocked, never changes -> `still_at_risk` (now `bool(signals)`) stays true every round even though
+    # nothing here is `in_progress`/has a low completion forecast at all — the exact case the
+    # `still_at_risk` fix covers.
+    retrieval = FakeRetrieval(issue_rows=[
+        {"issue_key": "PAY-1", "status": "blocked", "updated_at": "2026-07-01T00:00:00Z"},
+    ] * 10)  # 10 done-less rows keeps completion forecast low too, but blocked alone must be sufficient
+    graph = _graph(client, retrieval, FakeJiraActions())
+    cfg = _cfg()
+    thread_id = cfg["configurable"]["thread_id"]
+
+    await graph.ainvoke(_state(), config=cfg)
+    result = await graph.ainvoke(Command(resume={"decision": "approve", "plan_id": "plan_a"}), config=cfg)
+    assert "__interrupt__" in result  # reached wait_for_reevaluation
+    await trigger_reevaluation(graph, thread_id, source="manual")
+    snap = await graph.aget_state(cfg)
+    assert snap.values["status"] == "awaiting_plan_approval"  # still at risk -> looped into round 1
+    assert snap.values["prior_committed_actions"] == ["Raised PAY-1 priority to highest"]
+
+    round1_prompt = client.completions.calls[-1]["messages"][0]["content"]
+    assert "Raised PAY-1 priority to highest" in round1_prompt
+    assert "do not repeat" in round1_prompt.lower()
+
+
+async def test_plan_prompt_tells_the_model_not_to_ignore_an_external_blocker_in_comments():
+    """Found live: a plan asked an owner to "confirm you have resumed [X] and provide a completion
+    date" — while the plan's own rationale, one paragraph above, said progress was zero because the
+    team had been diverted to a production incident. The comment ignored the very blocker the plan was
+    built on, asking someone doing incident response to commit to an unrelated delivery date as if the
+    incident weren't happening. Locks in that the prompt now tells the model to acknowledge and ask
+    about an external blocker's status instead of writing around it.
+    """
+    diagnosis = DiagnosisResult(hypotheses=[_hyp(["risk1"])], overall_confidence="sufficient")
+    retrieval = FakeRetrieval(issue_rows=[
+        {"issue_key": "PAY-1", "status": "planned", "updated_at": "2026-07-20T00:00:00Z"},
+    ])
+    client = FakeInstructorClient({DiagnosisResult: [diagnosis], RecoveryPlanSet: [_plan_set()]})
+    graph = _graph(client, retrieval, FakeJiraActions())
+
+    await graph.ainvoke(_state(), config=_cfg())
+
+    plan_prompt = client.completions.calls[-1]["messages"][0]["content"]
+    assert "external blocker" in plan_prompt
+    assert "do not ask them to simply confirm" in plan_prompt.lower()
+
+
+async def test_signals_name_the_owner_so_generated_comments_can_address_a_person():
+    """Direct product ask: "if a plan is accepted and it's sensible to notify the issue owner, that
+    needs to exist." The blocker was data, not logic — `IssueRowOut` carried no assignee until
+    vectorization-service migrations/012. With it plumbed through, every per-issue signal names the
+    owner, which is what lets `plan_node` address a real person instead of asking a comment's reader
+    to identify themselves.
+    """
+    retrieval = FakeRetrieval(issue_rows=[
+        {"issue_key": "PAY-1", "status": "blocked", "updated_at": "2026-07-01T00:00:00Z",
+         "assignee_name": "Maya Chen", "story_points": 5},
+    ])
+    signals = await _detect_risk_signals(retrieval, 5000014, 7)
+    blocked = next(s for s in signals if s.signal_type == "blocked_no_flag")
+    assert "Maya Chen" in blocked.description
+
+    # Unassigned is a real state worth saying out loud, not silently omitting.
+    unassigned = FakeRetrieval(issue_rows=[
+        {"issue_key": "PAY-2", "status": "blocked", "updated_at": "2026-07-01T00:00:00Z"},
+    ])
+    signals = await _detect_risk_signals(unassigned, 5000014, 7)
+    assert "No one is assigned" in next(s for s in signals if s.signal_type == "blocked_no_flag").description
+
+
+async def test_owner_overloaded_falls_back_to_issue_count_when_nothing_is_estimated():
+    """No story points anywhere in the sprint is a legitimate state (not every team points every
+    ticket) — the signal must still be computable, just on issue count instead of weight.
+    `owner_overloaded` was declared in `RiskSignal.signal_type` from the start but never computed at
+    all — impossible without assignee data. It must carry an issue_key: `plan_node` hands off to a
+    human when no signal names a concrete issue, so a keyless signal would be undiagnosable.
+    """
+    rows = [
+        {"issue_key": f"PAY-{i}", "status": "in_progress", "updated_at": "2026-08-08T00:00:00Z",
+         "assignee_name": "Maya Chen"}
+        for i in range(1, 4)
+    ]
+    signals = await _detect_risk_signals(FakeRetrieval(issue_rows=rows), 5000014, 7)
+    overloaded = [s for s in signals if s.signal_type == "owner_overloaded"]
+    assert len(overloaded) == 1
+    assert "Maya Chen" in overloaded[0].description
+    assert "no story points estimated" in overloaded[0].description
+    assert overloaded[0].issue_key  # must be actionable, not sprint-level
+
+
+async def test_owner_overloaded_uses_points_share_not_raw_issue_count_when_estimated():
+    """Direct product feedback: issues have different sizes, so a raw issue-count threshold treats a
+    1-point ticket and an 8-point ticket as identical load — a points-weighted share is the more
+    honest measure of who's actually the bottleneck.
+    """
+    # Maya holds 1 large ticket (8 points) + 1 small one (2 points) = 10/14 = 71% of unfinished work,
+    # across only 2 issues — would NOT trip a raw "3+ issues" count rule, but clearly should trip a
+    # points-share rule.
+    rows = [
+        {"issue_key": "PAY-1", "status": "in_progress", "updated_at": "2026-08-08T00:00:00Z",
+         "assignee_name": "Maya Chen", "story_points": 8},
+        {"issue_key": "PAY-2", "status": "in_progress", "updated_at": "2026-08-08T00:00:00Z",
+         "assignee_name": "Maya Chen", "story_points": 2},
+        {"issue_key": "PAY-3", "status": "planned", "updated_at": "2026-08-08T00:00:00Z",
+         "assignee_name": "Liam Ortiz", "story_points": 4},
+    ]
+    signals = await _detect_risk_signals(FakeRetrieval(issue_rows=rows), 5000014, 7)
+    overloaded = [s for s in signals if s.signal_type == "owner_overloaded"]
+    assert len(overloaded) == 1
+    assert "Maya Chen" in overloaded[0].description
+    assert "10/14" in overloaded[0].description
+    assert "71%" in overloaded[0].description
+
+    # A single big ticket being the only unfinished work left for anyone isn't "overloaded" — that's
+    # just what's left. The `_OVERLOADED_MIN_ISSUES` floor exists specifically for this case.
+    one_ticket = [
+        {"issue_key": "PAY-1", "status": "in_progress", "updated_at": "2026-08-08T00:00:00Z",
+         "assignee_name": "Maya Chen", "story_points": 8},
+    ]
+    signals = await _detect_risk_signals(FakeRetrieval(issue_rows=one_ticket), 5000014, 7)
+    assert not any(s.signal_type == "owner_overloaded" for s in signals)
+
+
+async def test_completion_is_measured_in_story_points_when_they_exist():
+    """Real sprints commit and track in points. By issue count alone, 8 trivial tickets done out of 10
+    reads as "80% complete" even when the two left carry most of the weight — 3/30 points is the
+    honest number, and it's the one that trips the risk threshold.
+    """
+    rows = [{"issue_key": f"PAY-{i}", "status": "done", "updated_at": "x", "story_points": 1} for i in range(8)]
+    rows += [{"issue_key": f"PAY-{8+i}", "status": "planned", "updated_at": "x", "story_points": 20} for i in range(2)]
+    signals = await _detect_risk_signals(FakeRetrieval(issue_rows=rows), 5000014, 7)
+    forecast = next(s for s in signals if s.signal_type == "low_completion_forecast")
+    assert "story points" in forecast.description
+    assert "8/48" in forecast.description  # 8 of 48 points, not "8/10 issues (80%)"
+
+    # No estimates anywhere is a legitimate state — fall back to counting issues, and say so.
+    unestimated = [{"issue_key": f"PAY-{i}", "status": "planned", "updated_at": "x"} for i in range(5)]
+    signals = await _detect_risk_signals(FakeRetrieval(issue_rows=unestimated), 5000014, 7)
+    forecast = next(s for s in signals if s.signal_type == "low_completion_forecast")
+    assert "no story points estimated" in forecast.description
+
+
+async def test_sprint_goal_reaches_both_prompts():
+    """`RecoveryPlan.impact_on_goal` has always been a required schema field the prompt asked the model
+    to fill in — while never showing it the goal. "Impact on goal" was the model inferring a plausible
+    goal from ticket titles. Both prompts must now carry the real one.
+    """
+    diagnosis = DiagnosisResult(hypotheses=[_hyp(["risk1"])], overall_confidence="sufficient")
+    client = FakeInstructorClient({DiagnosisResult: [diagnosis], RecoveryPlanSet: [_plan_set()]})
+    retrieval = FakeRetrieval(
+        issue_rows=list(_AT_RISK_ROWS),
+        sprints=[{"sprint_id": 7, "goal": "Ship the redesigned checkout to 100% of traffic"}],
+    )
+    graph = _graph(client, retrieval, FakeJiraActions())
+    await graph.ainvoke(_state(), config=_cfg())
+
+    prompts = [c["messages"][0]["content"] for c in client.completions.calls]
+    assert len(prompts) == 2  # diagnose + plan
+    assert all("Ship the redesigned checkout to 100% of traffic" in p for p in prompts)
+
+
+async def test_scope_added_late_flags_an_issue_moved_in_after_the_sprint_midpoint():
+    """Real example this catches: a 10-day sprint starts with committed tickets; on day 7 someone
+    drags in 2 "quick" extras during grooming. Every other signal reads that as the team executing
+    worse (falling completion %, an overloaded assignee) — this is the one deterministic fact that
+    names the actual cause as scope moving, not execution.
+    """
+    start = date.today() - timedelta(days=7)
+    end = date.today() + timedelta(days=3)  # 10-day sprint, today is day 7 -> 70% elapsed
+    sprint_name = "Sprint 7"
+    retrieval = FakeRetrieval(
+        issue_rows=[{"issue_key": "PAY-1", "status": "planned", "updated_at": "x"}],
+        sprints=[{"sprint_id": 7, "sprint_name": sprint_name,
+                  "start_date": start.isoformat(), "end_date": end.isoformat()}],
+        history=[
+            {"issue_key": "PAY-1", "field_name": "sprint", "to_value": sprint_name,
+             "changed_at": (start + timedelta(days=6)).isoformat() + "T00:00:00Z"},  # day 6 of 10 = late
+        ],
+    )
+    signals = await _detect_risk_signals(retrieval, 5000014, 7)
+    late = [s for s in signals if s.signal_type == "scope_added_late"]
+    assert len(late) == 1
+    assert late[0].issue_key == "PAY-1"
+    assert sprint_name in late[0].description
+
+    # Added on day 1 (pre-sprint grooming refinement, not scope creep) must NOT fire.
+    early_retrieval = FakeRetrieval(
+        issue_rows=[{"issue_key": "PAY-2", "status": "planned", "updated_at": "x"}],
+        sprints=[{"sprint_id": 7, "sprint_name": sprint_name,
+                  "start_date": start.isoformat(), "end_date": end.isoformat()}],
+        history=[
+            {"issue_key": "PAY-2", "field_name": "sprint", "to_value": sprint_name,
+             "changed_at": start.isoformat() + "T00:00:00Z"},
+        ],
+    )
+    signals = await _detect_risk_signals(early_retrieval, 5000014, 7)
+    assert not any(s.signal_type == "scope_added_late" for s in signals)
+
+
+
+
+async def test_index_catch_up_returns_immediately_when_nothing_was_committed():
+    """No watermarks means no writes to wait on — must not poll or sleep at all."""
+    retrieval = FakeRetrieval(issue_rows=list(_AT_RISK_ROWS))
+    assert await _await_index_catch_up(retrieval, 5000014, 7, {}) is True
+    assert retrieval.query_issues_calls == 0
+
+
+async def test_index_catch_up_waits_until_the_read_model_reflects_the_write():
+    """**The replacement for a guessed sleep**: the indexed row starts older than the watermark
+    recorded from jira-backend at commit time, so the first poll must not be accepted; once the fake
+    index is updated (as a real reindex would), the wait ends. Proves it's the *condition* being
+    waited on, not elapsed time.
+    """
+    stale = {"issue_key": "PAY-142", "status": "in_progress", "updated_at": "2026-08-01T00:00:00Z"}
+    retrieval = FakeRetrieval(issue_rows=[dict(stale)])
+    watermarks = {"PAY-142": "2026-08-05T00:00:00Z"}  # jira-backend says the write landed on the 5th
+
+    async def _reindex_after_first_poll():
+        while retrieval.query_issues_calls < 1:
+            await asyncio.sleep(0)
+        retrieval.issue_rows = [{**stale, "updated_at": "2026-08-05T00:00:01Z"}]
+
+    reindex = asyncio.create_task(_reindex_after_first_poll())
+    assert await _await_index_catch_up(retrieval, 5000014, 7, watermarks) is True
+    await reindex
+    assert retrieval.query_issues_calls >= 2  # the first, stale read was correctly rejected
+
+
+async def test_index_catch_up_treats_an_issue_that_left_the_sprint_as_caught_up():
+    """A committed `move_out_of_sprint` makes the issue vanish from this sprint's rows — that absence
+    is itself proof the write propagated, not a reason to keep waiting for a row that will never come.
+    """
+    retrieval = FakeRetrieval(issue_rows=[])  # PAY-142 is gone from the sprint
+    assert await _await_index_catch_up(retrieval, 5000014, 7, {"PAY-142": "2026-08-05T00:00:00Z"}) is True
+    assert retrieval.query_issues_calls == 1
+
+
+async def test_index_catch_up_gives_up_after_the_timeout_instead_of_stalling_the_workflow():
+    """The honest bound: a read model that never catches up must not hang the graph forever — it
+    reports failure and lets the caller read anyway."""
+    retrieval = FakeRetrieval(issue_rows=[
+        {"issue_key": "PAY-142", "status": "in_progress", "updated_at": "2026-08-01T00:00:00Z"},
+    ])
+    with patch.object(graph_module, "_INDEX_CATCH_UP_TIMEOUT_SECONDS", 0.05), \
+         patch.object(graph_module, "_INDEX_CATCH_UP_POLL_SECONDS", 0.01):
+        caught_up = await _await_index_catch_up(retrieval, 5000014, 7, {"PAY-142": "2026-08-05T00:00:00Z"})
+
+    assert caught_up is False
+    assert retrieval.query_issues_calls >= 2
+
+
+async def test_reevaluate_node_marks_index_catch_up_timed_out_when_the_wait_gives_up():
+    """The signal a user-facing caveat and the Prometheus counter both key off — must actually reach
+    the returned state, not just get logged and dropped."""
+    retrieval = FakeRetrieval(issue_rows=[
+        {"issue_key": "PAY-142", "status": "in_progress", "updated_at": "2026-08-01T00:00:00Z"},
+    ])
+    state = _state()
+    state["index_watermarks"] = {"PAY-142": "2026-08-05T00:00:00Z"}  # never satisfied by the fake index
+
+    with patch.object(graph_module, "_INDEX_CATCH_UP_TIMEOUT_SECONDS", 0.05), \
+         patch.object(graph_module, "_INDEX_CATCH_UP_POLL_SECONDS", 0.01):
+        result = await reevaluate_node(state, retrieval)
+
+    assert result["index_catch_up_timed_out"] is True
+    assert result["status"] in ("escalated", "diagnosing")  # PAY-142 is still in_progress => still at risk
+
+
+async def test_reevaluate_node_does_not_flag_a_timeout_when_nothing_was_committed():
+    """No watermarks (nothing committed since the last round) means nothing to wait on — this must
+    never look like a degraded read when there was no write to catch up to in the first place."""
+    retrieval = FakeRetrieval(issue_rows=list(_HEALTHY_ROWS))
+    state = _state()
+    state["index_watermarks"] = {}
+
+    result = await reevaluate_node(state, retrieval)
+
+    assert result["index_catch_up_timed_out"] is False
+    assert result["status"] == "recovered"
+
+
+def _stale_sprint_rows(ts_for_stuck):
+    """8 done + 2 stuck issues: 86% complete by points, so `low_completion_forecast` does NOT fire and
+    `long_in_progress` is the only thing standing between this sprint and a "recovered" verdict."""
+    rows = [{"issue_key": f"PAY-{i}", "status": "done", "assignee_name": "Sam", "story_points": 3,
+             "updated_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()} for i in range(8)]
+    rows += [{"issue_key": "PAY-142", "status": "in_progress", "assignee_name": "Maya",
+              "story_points": 2, "updated_at": ts_for_stuck},
+             {"issue_key": "PAY-99", "status": "in_progress", "assignee_name": "Raj",
+              "story_points": 2, "updated_at": ts_for_stuck}]
+    return rows
+
+
+class _CountingRetrieval(FakeRetrieval):
+    """FakeRetrieval with a real counts_by_status — `low_completion_forecast` reads it, and leaving it
+    empty makes every sprint look 0% done, which masks exactly the bug these tests are about."""
+
+    async def query_issues(self, space_ids, filters):
+        self.query_issues_calls += 1
+        counts: dict = {}
+        for row in self.issue_rows:
+            counts[row.get("status", "")] = counts.get(row.get("status", ""), 0) + 1
+        return type("R", (), {
+            "total_count": len(self.issue_rows), "counts_by_status": counts,
+            "counts_by_type": {}, "issues": self.issue_rows,
+        })()
+
+
+async def test_our_own_write_does_not_reset_the_staleness_clock_into_a_false_recovered():
+    """**Found live, the most consequential bug in this feature.** jira-backend's `@PreUpdate` stamps
+    `updatedAt = now()` on any issue write, so committing a `change_priority` on a six-day-stale ticket
+    made `_days_since(updated_at)` read 0 — `long_in_progress` vanished, and a sprint with two tickets
+    still sitting untouched in `in_progress` reported `status="recovered"`. The workflow was declaring
+    victory by touching the ticket. Staleness must be measured from before *our own* write.
+    """
+    stale = (datetime.now(timezone.utc) - timedelta(days=6)).isoformat()
+    our_write = datetime.now(timezone.utc).isoformat()
+    state = _state()
+    state["pre_write_updated_at"] = {"PAY-142": stale, "PAY-99": stale}
+    state["index_watermarks"] = {"PAY-142": our_write, "PAY-99": our_write}
+
+    # The index now shows both tickets "updated just now" — by us, not by anyone doing the work.
+    result = await reevaluate_node(state, _CountingRetrieval(issue_rows=_stale_sprint_rows(our_write)))
+
+    assert result["status"] != "recovered"
+    assert sorted(s.issue_key for s in result["risk_signals"] if s.signal_type == "long_in_progress") == [
+        "PAY-142", "PAY-99",
+    ]
+
+
+async def test_a_genuine_human_update_after_our_write_still_counts_as_real_activity():
+    """The other half of the same rule — discounting our own write must not blind the check to somebody
+    actually picking the ticket back up. A timestamp newer than our own write is real activity."""
+    stale = (datetime.now(timezone.utc) - timedelta(days=6)).isoformat()
+    our_write = datetime.now(timezone.utc) - timedelta(minutes=5)
+    human_touched_after = (our_write + timedelta(minutes=1)).isoformat()
+    state = _state()
+    state["pre_write_updated_at"] = {"PAY-142": stale, "PAY-99": stale}
+    state["index_watermarks"] = {"PAY-142": our_write.isoformat(), "PAY-99": our_write.isoformat()}
+
+    result = await reevaluate_node(state, _CountingRetrieval(issue_rows=_stale_sprint_rows(human_touched_after)))
+
+    assert result["status"] == "recovered"
+
+
+async def test_commit_records_the_pre_write_timestamp_once_and_keeps_the_original_baseline():
+    """`commit_one_action_node` must capture the baseline *before* writing, and a second action on the
+    same issue (or a later escalation round) must not overwrite it with a timestamp this workflow
+    itself produced — otherwise round 2 reintroduces exactly the bug round 1's baseline prevents.
+    """
+    diagnosis = DiagnosisResult(hypotheses=[_hyp(["ev1"])], overall_confidence="sufficient")
+    jira = FakeJiraActions(updated_at="2026-08-09T00:00:00Z")
+    graph = _graph(_client(diagnosis, _plan_set()), FakeRetrieval(issue_rows=list(_AT_RISK_ROWS)), jira)
+    cfg = _cfg()
+
+    await graph.ainvoke(_state(), config=cfg)
+    await graph.ainvoke(Command(resume={"decision": "approve", "plan_id": "plan_a"}), config=cfg)
+
+    snap = await graph.aget_state(cfg)
+    pre = snap.values["pre_write_updated_at"]
+    assert set(pre) == {"PAY-142", "PAY-97"}  # one per action target in plan_a
+    assert all(v == "2026-08-09T00:00:00Z" for v in pre.values())
