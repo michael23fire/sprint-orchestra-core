@@ -198,6 +198,17 @@ class RecoveryStatusResponse(_CamelModel):
     # "escalated"/"diagnosing" result right after actions were just approved doesn't read as an
     # unexplained inconsistency. Never true on a fresh "diagnosing" that hasn't reevaluated anything yet.
     index_catch_up_timed_out: bool = False
+    # **Found live, from a direct user question ("can the UI even show which action is left after a
+    # crash?")**: `plans` is always `state["plans"]` — the *originally proposed* 1-3 options from
+    # `plan_node`, never touched again after approval. `decision="edit"` replaces the actual executing
+    # plan with a human-modified `RecoveryPlan` (`approved_plan`), but the API never exposed that object
+    # — only the pre-edit proposal. Reproduced live: edited a plan to target a nonexistent issue key,
+    # approved it, watched it fail partway through — the response's `plans` still showed the original,
+    # un-edited action list, not what had actually been sent to Jira or what `committed_actions`' indices
+    # actually refer to. Checkmarks and action text would have been wrong, not just stale, whenever an
+    # edit changed the action count/order/content. Populated once a plan is actually approved (covers
+    # committing/failed/waiting_reevaluation/recovered/escalated); `None` while still choosing.
+    approved_plan: Optional[PlanOut] = None
 
 
 def _status_response(thread_id: str, values: dict) -> RecoveryStatusResponse:
@@ -217,6 +228,7 @@ def _status_response(thread_id: str, values: dict) -> RecoveryStatusResponse:
         token_usage=values.get("token_usage", 0),
         error=values.get("error"),
         index_catch_up_timed_out=values.get("index_catch_up_timed_out", False),
+        approved_plan=PlanOut(**values["approved_plan"].model_dump()) if values.get("approved_plan") else None,
     )
 
 
