@@ -18,8 +18,7 @@ CPU-only mode (confirmed working below), but it gets none of the concurrency/thr
 justifies choosing vLLM over a simpler server in the first place. This is why the model used here is
 tiny (`Qwen/Qwen2.5-0.5B-Instruct`, not the 27B/35B class LM Studio serves for actual local dev) — the
 goal is proving the deployment and the gateway routing are real, not using this for day-to-day work.
-**In a real cloud deployment, this same config would point at a GPU-backed vLLM instance instead** —
-see `docs/AI_FEATURE_ROADMAP.md`'s "Production cost-tiering" row for that architecture decision.
+**In a real cloud deployment, this same config would point at a GPU-backed vLLM instance instead.**
 
 ## Setup
 

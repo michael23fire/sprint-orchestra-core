@@ -58,7 +58,7 @@ headers are intentionally treated as trusted internal calls for local eval scrip
 | `jira-backend/` | Spring Boot domain API, OLTP data, FTS, object storage, and Kafka publishing |
 | `vectorization-service/` | Kafka ingestion, document extraction/chunking, embeddings, pgvector, hybrid retrieval, reranking |
 | `ai-service/` | Corrective RAG, structured tools, drafting/planning, LangGraph rollout and sprint recovery |
-| `docs/` | Architecture, schema/API design, evaluation case studies, deployment, and interview notes |
+| `docs/` | Architecture, schema/API design, and an ER diagram |
 | `observability/` | Optional Prometheus, Grafana, and Phoenix overlay |
 | `litellm-gateway/` | Optional provider gateway with rate and spend controls |
 | `vllm-server/` | Local vLLM deployment proof |
@@ -72,8 +72,6 @@ Important documents:
 - [Vectorization service](vectorization-service/README.md)
 - [Database schema](docs/DATABASE_SCHEMA_CORE.md)
 - [Core API design](docs/API_DESIGN_CORE.md)
-- [RAG accuracy case studies](docs/RAG_ACCURACY_CASE_STUDIES.md)
-- [AWS deployment](docs/AWS_DEPLOYMENT.md)
 
 ## Local development
 
@@ -232,5 +230,4 @@ Before handling real users or exposing this publicly, at minimum:
 - Add end-to-end distributed tracing. Request-id correlation, Prometheus/Grafana, and partial Phoenix
   LLM tracing exist, but they are not a complete cross-service trace.
 
-See [AWS deployment](docs/AWS_DEPLOYMENT.md) for a safe portfolio deployment boundary. It deliberately
-does not label the current stack production-ready.
+This is deliberately not labeled production-ready.

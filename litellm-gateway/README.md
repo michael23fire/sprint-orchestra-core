@@ -122,7 +122,6 @@ with no per-caller governance at all — the actual gap `ai-service`'s own cost 
   gateway would do.
 - **Master key is a plaintext default in `docker-compose.yml`** (`sk-litellm-local-master-key`,
   overridable via `LITELLM_MASTER_KEY` env var) — fine for local dev, not how a real secret would be
-  handled (see `docs/AWS_DEPLOYMENT.md` for the general "this is a demo, not hardened for a public
-  deployment" posture already documented elsewhere in this project).
+  handled (this is a demo, not hardened for a public deployment).
 - **`claude-production` route untested live** — no `ANTHROPIC_API_KEY` in this environment, same
   caveat as the rest of this project's Anthropic path.

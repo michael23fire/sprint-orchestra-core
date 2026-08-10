@@ -163,4 +163,4 @@ are attributable, with direct reproduction evidence, to the upstream local model
 - No sustained soak test (minutes-to-hours) — only short bursts (30-90s), enough to surface
   concurrency bugs, not to characterize long-run memory/connection-leak behavior.
 - Single-machine test — client (Locust) and both services ran on the same laptop, so network latency
-  isn't represented; a real deployment (see `../docs/AWS_DEPLOYMENT.md`) would add real network RTT.
+  isn't represented; a real deployment would add real network RTT.

@@ -1,8 +1,8 @@
 name: CI
 
-# Runs on every push and PR — the guardrail that would have caught the backfill_jira_backend.py bug
-# (see docs/RAG_ACCURACY_CASE_STUDIES.md) before it ever touched real data: that bug had a real
-# regression test written for it, but nothing ran that test automatically until now.
+# Runs on every push and PR — the guardrail that would have caught a real backfill_jira_backend.py
+# bug before it ever touched real data: that bug had a real regression test written for it, but
+# nothing ran that test automatically until now.
 on:
   push:
   pull_request:

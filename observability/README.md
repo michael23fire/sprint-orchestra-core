@@ -62,8 +62,7 @@ Generate some traffic to see it move — hit `/ask` and `/search` a few times, o
 `GF_AUTH_ANONYMOUS_ENABLED=true` (admin role, no login) is set in
 `docker-compose.observability.yml` purely for local-demo convenience — zero friction to open the
 dashboard while showing this off. **Not appropriate for anything beyond a laptop demo.** A real
-deployment (see `../docs/AWS_DEPLOYMENT.md`) would set a real `GF_SECURITY_ADMIN_PASSWORD` and turn
-anonymous access off.
+deployment would set a real `GF_SECURITY_ADMIN_PASSWORD` and turn anonymous access off.
 
 ## Stop it
 

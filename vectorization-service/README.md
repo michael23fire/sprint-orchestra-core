@@ -78,7 +78,7 @@ jira-backend ──(AFTER_COMMIT)──▶ Kafka: jira.content.ingestion ──�
   that can respond "illegible" instead of guessing a character sequence — the actual capability
   character-level OCR is missing. Verified against a real degraded test photo end-to-end through the
   real vector store and a live `/ask` call: went from a confidently wrong SKU answer ("Mx 62") to the
-  correct value ("W-7734") — see `docs/RAG_ACCURACY_CASE_STUDIES.md` Case Studies 27/30.
+  correct value ("W-7734").
 - **Selective PDF-page VLM fallback** (`VEC_VLM_PDF_ENABLED`, also off by default) — Docling stays
   first for born-digital PDFs. For scanned or visual-heavy PDFs, PyMuPDF identifies low-text and
   visual pages, renders only those pages to PNG (200 DPI by default, capped at 12 pages), and sends
