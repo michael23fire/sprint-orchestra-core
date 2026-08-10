@@ -104,6 +104,8 @@ _SIGNAL_LABELS = {
 _ISSUE_KEY_RE = re.compile(r"\b[A-Z][A-Z0-9]*-\d+\b", re.IGNORECASE)
 
 from app.auth.space_membership import SpaceMembershipChecker, SpaceMembershipError
+from app.llm.pricing import estimate_cost_usd
+from app.llm.types import Usage
 from app.sprint_recovery.jira_actions_client import JiraActionError, JiraActionsClient
 from app.sprint_recovery.schemas import (
     DiagnosisResult,
@@ -125,13 +127,97 @@ logger = logging.getLogger(__name__)
 # ceiling (SprintRecoveryState.max_clarification_rounds / max_escalation_rounds), not hardcoded here.
 _TOKENS_PER_LLM_CALL_ESTIMATE = 4000  # coarse, pre-call budget check — see _check_budget's docstring
 
+# `(usage, cost_usd) -> None`, wired by app.main to `ServiceStats.record` so this workflow's spend
+# lands in the same GET /stats and `agent_cost_usd_total` Prometheus counter as every other LLM call
+# in the service. Passed explicitly down from `build_sprint_recovery_graph` rather than through a
+# ContextVar like `ON_STAGE_VAR`: that one is genuinely per-request (which SSE queue is listening),
+# whereas this sink is process-wide and known at startup, so a plain argument is both simpler and
+# testable without context plumbing.
+UsageRecorder = Callable[[Usage, float], None]
+
 
 def _check_budget(state: SprintRecoveryState) -> bool:
     """True if there's room for one more LLM call. Coarse and pre-emptive on purpose: the real
     per-call token usage is only known *after* the call, but the whole point of a budget ceiling is to
-    stop *before* spending more, not to notice afterward that too much was already spent.
+    stop *before* spending more, not to notice afterward that too much was already spent. The *recorded*
+    usage is the real thing (see `_call_model`); only this forward-looking guard is an estimate.
     """
     return state["token_usage"] + _TOKENS_PER_LLM_CALL_ESTIMATE <= state["max_token_budget"]
+
+
+def _usage_from_completion(completion) -> Usage:
+    """Normalizes whatever the provider returned alongside a structured response into `Usage`.
+
+    Anthropic reports `input_tokens`/`output_tokens` (plus cache counters); OpenAI-compatible servers
+    report `prompt_tokens`/`completion_tokens`, with cached input under
+    `prompt_tokens_details.cached_tokens`. Both shapes are read here rather than in each caller so the
+    two `create_with_completion` sites below stay about diagnosis and planning, not billing wire
+    formats. Anything missing counts as 0: a local server that reports no usage at all (a bare
+    llama.cpp) must degrade to "free and unmeasured", never to an exception — same principle
+    `app/llm/types.py`'s `Usage` already documents.
+    """
+    raw = getattr(completion, "usage", None)
+    if raw is None:
+        return Usage()
+
+    def _int(*names: str) -> int:
+        for name in names:
+            value = getattr(raw, name, None)
+            if isinstance(value, (int, float)):
+                return int(value)
+        return 0
+
+    cached = 0
+    details = getattr(raw, "prompt_tokens_details", None)
+    if details is not None and isinstance(getattr(details, "cached_tokens", None), (int, float)):
+        cached = int(details.cached_tokens)
+    input_tokens = _int("input_tokens", "prompt_tokens")
+    return Usage(
+        # OpenAI's `prompt_tokens` is inclusive of cached tokens; Anthropic's `input_tokens` excludes
+        # them (they're reported separately). Subtracting here keeps the two providers priced the same
+        # way — cached input is billed at a tenth of fresh input, so folding them together would
+        # overstate cost by ~10x on the cached portion.
+        input_tokens=max(0, input_tokens - cached) if cached else input_tokens,
+        output_tokens=_int("output_tokens", "completion_tokens"),
+        cache_creation_input_tokens=_int("cache_creation_input_tokens"),
+        cache_read_input_tokens=_int("cache_read_input_tokens") or cached,
+    )
+
+
+async def _call_model(
+    client, model: str, response_model, prompt: str, on_usage: Optional[UsageRecorder] = None,
+):
+    """One structured LLM call, returning `(parsed, tokens, cost_usd)` with the *real* token counts.
+
+    **Found live, from a direct question about what this workflow costs**: every node used to advance
+    `token_usage` by a flat `_TOKENS_PER_LLM_CALL_ESTIMATE`, so the number the API reported was a
+    guess repeated N times, not a measurement — unanswerable if anyone asked what a run actually cost.
+    `create_with_completion` returns the raw provider response alongside the parsed model, which is
+    what makes the true counts available without changing how any caller consumes the result.
+
+    Known bound, stated rather than hidden: `max_retries=2` means `instructor` may make more than one
+    provider call to get a valid parse, and only the final response's usage is returned here — a
+    reparse undercounts. That is a bounded, always-in-the-same-direction error on an observability
+    number, which is preferable to threading a per-attempt hook through every call site.
+    """
+    parsed, completion = await client.chat.completions.create_with_completion(
+        model=model, response_model=response_model, max_retries=2,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    usage = _usage_from_completion(completion)
+    cost = estimate_cost_usd(
+        model, usage.input_tokens, usage.output_tokens,
+        usage.cache_creation_input_tokens, usage.cache_read_input_tokens,
+    )
+    if on_usage is not None:
+        try:
+            on_usage(usage, cost)
+        except Exception:  # noqa: BLE001 - cost bookkeeping must never break a real workflow
+            logger.exception("failed recording sprint-recovery LLM usage")
+    tokens = usage.input_tokens + usage.output_tokens + usage.cache_read_input_tokens
+    # A provider that reports nothing at all would otherwise make the budget ceiling unenforceable
+    # (0 tokens forever), so fall back to the same estimate the pre-call guard uses.
+    return parsed, tokens or _TOKENS_PER_LLM_CALL_ESTIMATE, cost
 
 
 async def _gather_evidence(
@@ -624,7 +710,10 @@ async def _build_sprint_snapshot(retrieval, space_id: int, sprint_id: int) -> Sp
     )
 
 
-async def diagnose_node(state: SprintRecoveryState, client, model: str, retrieval) -> dict:
+async def diagnose_node(
+    state: SprintRecoveryState, client, model: str, retrieval,
+    on_usage: Optional[UsageRecorder] = None,
+) -> dict:
     if not _check_budget(state):
         return {"status": "failed", "error": "token budget exhausted before diagnosis could complete"}
 
@@ -689,17 +778,15 @@ async def diagnose_node(state: SprintRecoveryState, client, model: str, retrieva
         "vice versa — the two must match exactly. Set overall_confidence='insufficient' only if there "
         "is a genuine, specific gap a human could fill — not as a default hedge."
     )
-    result: DiagnosisResult = await client.chat.completions.create(
-        model=model, response_model=DiagnosisResult, max_retries=2,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    result, tokens_used, cost_used = await _call_model(client, model, DiagnosisResult, prompt, on_usage)
     grounded = _apply_grounding(result.hypotheses, evidence)
     update = {
         "risk_signals": signals, "evidence": evidence, "hypotheses": grounded,
         # Carried forward, not discarded — see `_build_sprint_snapshot`. This is what lets `plan_node`
         # reason about issues that never tripped a per-issue signal of their own.
         "sprint_snapshot": await _build_sprint_snapshot(retrieval, state["space_id"], state["sprint_id"]),
-        "token_usage": state["token_usage"] + _TOKENS_PER_LLM_CALL_ESTIMATE,
+        "token_usage": state["token_usage"] + tokens_used,
+        "cost_usd": state.get("cost_usd", 0.0) + cost_used,
     }
     if result.overall_confidence == "insufficient" and state["clarification_rounds"] < state["max_clarification_rounds"]:
         update["status"] = "diagnosing"  # will route to clarify
@@ -726,6 +813,10 @@ async def clarify_node(state: SprintRecoveryState) -> dict:
     answer = interrupt({"question": state["clarification_question"], "round": state["clarification_rounds"] + 1})
     return {
         "clarification_answer": answer.get("answer", ""),
+        # Held separately from `clarification_answer` (which persists) so `plan_node` can tell "a human
+        # just said this, reply to it" apart from "a human said this several rounds ago" — see the
+        # field's own comment in state.py.
+        "unanswered_human_note": answer.get("answer", ""),
         "clarification_rounds": state["clarification_rounds"] + 1,
         "status": "diagnosing",
     }
@@ -756,7 +847,10 @@ def _render_snapshot(snapshot: Optional[SprintSnapshot]) -> str:
     return f"\n{timing_text}{header}\n" + "\n".join(lines) + "\n"
 
 
-async def plan_node(state: SprintRecoveryState, client, model: str, retrieval) -> dict:
+async def plan_node(
+    state: SprintRecoveryState, client, model: str, retrieval,
+    on_usage: Optional[UsageRecorder] = None,
+) -> dict:
     """**Found live, not hypothetically**: the first end-to-end run against real AtlasCart data
     produced actions with `target_issue_key` values like `"ev15"`, `"ev3"` — the model had confused
     `EvidenceItem.citation_id` (only ever meaningful for `RootCauseHypothesis.supporting_evidence_ids`)
@@ -847,19 +941,44 @@ async def plan_node(state: SprintRecoveryState, client, model: str, retrieval) -
         "action (e.g. add_comment to confirm/close the loop) and do not offer move_out_of_sprint or a "
         "raised priority as an option for that issue, even as an alternative choice."
     )
-    result: RecoveryPlanSet = await client.chat.completions.create(
-        model=model, response_model=RecoveryPlanSet, max_retries=2,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    # **Found live, from direct product feedback**: a human rewound with "we will add 2 extra engineers
+    # to this sprint" and got back plans that never mentioned engineers. It had genuinely been taken
+    # into account — but only inside a hypothesis, which reads as silence from the plan's point of view.
+    # Asked for only when a note is actually outstanding, so no tokens are spent (and no answer is
+    # invented) on rounds where nobody said anything.
+    human_note = state.get("unanswered_human_note")
+    if human_note:
+        prompt += (
+            f"\n\nThe person reviewing this sprint just told you: \"{human_note}\"\n"
+            "Fill in `response_to_human_note`: reply to them directly, in 1-3 plain sentences, "
+            "addressing them as \"you\". If what they said changed these plans, say specifically what "
+            "it changed. If it could NOT change them, say exactly why and name the concrete obstacle — "
+            "for example the work is blocked on a party outside this team's control, or what they "
+            "described isn't something any available action can do (the only actions that exist are "
+            "link_dependency, change_priority, move_out_of_sprint, add_comment; there is no way to "
+            "assign people, change scope estimates, or contact anyone outside Jira). Never claim to "
+            "have acted on what they said if the plans above don't actually reflect it — being straight "
+            "about why it doesn't help is more useful to them than a plan that pretends."
+        )
+    result, tokens_used, cost_used = await _call_model(client, model, RecoveryPlanSet, prompt, on_usage)
     plans = _validate_plan_issue_keys(result.plans, known_issue_keys)
     if not plans:
         return {
             "status": "failed", "error": "every proposed plan cited only invalid/unknown issue keys",
-            "token_usage": state["token_usage"] + _TOKENS_PER_LLM_CALL_ESTIMATE,
+            # Charged even though the result was unusable — the call was still paid for, and a cost
+            # number that only counts successful calls would understate exactly the runs worth noticing.
+            "token_usage": state["token_usage"] + tokens_used,
+            "cost_usd": state.get("cost_usd", 0.0) + cost_used,
         }
     return {
         "plans": plans, "status": "awaiting_plan_approval",
-        "token_usage": state["token_usage"] + _TOKENS_PER_LLM_CALL_ESTIMATE,
+        "token_usage": state["token_usage"] + tokens_used,
+        "cost_usd": state.get("cost_usd", 0.0) + cost_used,
+        # Both reset unconditionally: the note has now been answered, and `note_response` must only
+        # ever describe the plans it is shown beside — a stale reply carried into a later round would
+        # be worse than none, since it would look like an answer to something nobody just asked.
+        "note_response": result.response_to_human_note if human_note else None,
+        "unanswered_human_note": None,
     }
 
 
@@ -926,6 +1045,9 @@ async def approval_node(
         return {
             "decision": "revise", "status": "revising",
             "human_plan_feedback": feedback, "plan_revision_round": state["plan_revision_round"] + 1,
+            # The third way a human says something to this workflow, and it deserves the same direct
+            # reply as a clarification answer or a rewind note — see `unanswered_human_note` in state.py.
+            "unanswered_human_note": feedback,
         }
 
     if decision == "reject":
@@ -1160,12 +1282,15 @@ def _traced(node_name: str, fn):
     return _wrapped
 
 
-def build_sprint_recovery_graph(client, model: str, space_membership: SpaceMembershipChecker, retrieval, jira: JiraActionsClient):
+def build_sprint_recovery_graph(
+    client, model: str, space_membership: SpaceMembershipChecker, retrieval, jira: JiraActionsClient,
+    on_usage: Optional[UsageRecorder] = None,
+):
     async def _diagnose(state: SprintRecoveryState) -> dict:
-        return await diagnose_node(state, client, model, retrieval)
+        return await diagnose_node(state, client, model, retrieval, on_usage)
 
     async def _plan(state: SprintRecoveryState) -> dict:
-        return await plan_node(state, client, model, retrieval)
+        return await plan_node(state, client, model, retrieval, on_usage)
 
     async def _approval(state: SprintRecoveryState) -> dict:
         return await approval_node(state, space_membership, jira)
@@ -1212,29 +1337,63 @@ async def trigger_reevaluation(compiled_graph, thread_id: str, source: str, deta
     return await compiled_graph.ainvoke(Command(resume={"source": source, "detail": detail}), config=config)
 
 
-async def retry_recovery_commit(compiled_graph, thread_id: str) -> dict:
-    """Un-sticks a `status="failed"` (or resumes a crashed `"committing"`) thread. Three cases, not
-    two — **found live**: `status="failed"` can be reached two structurally different ways, and the
-    original two-case version only handled one of them correctly.
+def _has_uninterrupted_pending_task(snap) -> bool:
+    """True when LangGraph itself has a real pending task with nobody actually waiting on a human:
+    `snap.next` is non-empty and no task on it carries an `interrupt()`. This is the general form of "a
+    real crash left a pending task" — `status == "committing"` used to be the only instance of it this
+    module checked by name.
 
-    1. `status == "committing"`: a real crash left a pending task; bare `ainvoke(None, ...)` resumes it,
-       same as `app/planning/rollout_graph.py::retry_rollout`.
+    **Found live**: a crash between `reevaluate_node` looping back for the next escalation round and
+    `plan_node` finishing left a checkpoint at `status == "diagnosing"` with `snap.next == ("plan",)`
+    and no interrupt — a genuine crash, structurally identical to a crash mid-commit, but `status`
+    alone can't tell it apart from the *other* thing that also leaves `status == "diagnosing"`: a
+    real, intentional pause inside `clarify_node` waiting on a human's answer (which always carries a
+    real interrupt on its task). Checking `snap.next`/interrupts directly, instead of hardcoding one
+    status string, is what makes this correct for either case without conflating them: a genuine pause
+    must never be silently resumed this way, only a crash with nothing pending on a human should be.
+    """
+    return bool(snap.next) and not any(t.interrupts for t in snap.tasks)
+
+
+def is_resumable_after_a_crash(snap) -> bool:
+    """Whether `retry_recovery_commit` can do anything useful with this checkpoint at all — either a
+    `status == "failed"` thread (needs re-arming, see that function) or a genuine crash with real
+    pending work (see `_has_uninterrupted_pending_task`). Used by the `/retry` route's own guard so it
+    rejects the same cases `retry_recovery_commit` itself wouldn't know what to do with — for example a
+    checkpoint genuinely waiting on a human at `clarify`/`approval`/`wait_for_reevaluation`, which has
+    its own proper resume endpoint and must not be retried through this generic one.
+    """
+    return snap.values.get("status") == "failed" or _has_uninterrupted_pending_task(snap)
+
+
+async def retry_recovery_commit(compiled_graph, thread_id: str) -> dict:
+    """Un-sticks a thread `is_resumable_after_a_crash` says is safe to continue. Three cases:
+
+    1. A real crash left a pending task with no interrupt (`status == "committing"`, or any other node
+       a process died in the middle of — see `is_resumable_after_a_crash`): bare `ainvoke(None, ...)`
+       resumes it exactly where LangGraph's own checkpoint says it stopped, same as
+       `app/planning/rollout_graph.py::retry_rollout`.
     2. `status == "failed"` *after* a plan was approved (a `JiraActionError` mid-commit): nothing new
        needs deciding, just re-arm `commit_one_action` by replaying `approval`'s outgoing edge via
        `as_node="approval"` — see that sibling function's docstring for why `as_node` names the node
        whose edge should fire, not the node that reruns.
     3. `status == "failed"` *before* any plan was ever approved (diagnose/plan-generation hit the token
-       budget, or — the case this was actually missing — `plan_node`'s `_validate_plan_issue_keys`
-       guardrail rejected every proposed action as citing an unknown issue key). Here `approved_plan`
-       is still `None`. Case 2's `as_node="approval"` path would re-arm `commit_one_action_node`, which
-       unconditionally reads `state["approved_plan"].actions` — a guaranteed crash on `None`. Retrying
-       this case has to re-enter `plan` instead, via `as_node="diagnose"` (evidence/hypotheses are
-       already in state from the diagnose that already succeeded, so this cleanly re-runs just the plan
-       LLM call, not the whole diagnosis).
+       budget, or `plan_node`'s `_validate_plan_issue_keys` guardrail rejected every proposed action as
+       citing an unknown issue key). Here `approved_plan` is still `None`. Case 2's `as_node="approval"`
+       path would re-arm `commit_one_action_node`, which unconditionally reads
+       `state["approved_plan"].actions` — a guaranteed crash on `None`. Retrying this case has to
+       re-enter `plan` instead, via `as_node="diagnose"` (evidence/hypotheses are already in state from
+       the diagnose that already succeeded, so this cleanly re-runs just the plan LLM call, not the
+       whole diagnosis).
+
+    Case 1 must be checked first: for a crash landing anywhere *other* than mid-commit, `approved_plan`
+    can easily be non-`None` too (a stale value from an *earlier*, already-fully-committed escalation
+    round that nothing has cleared yet) — falling into case 2 there would re-arm `commit_one_action`
+    against actions already posted to Jira, re-sending them a second time.
     """
     config = {"configurable": {"thread_id": thread_id}}
     snap = await compiled_graph.aget_state(config)
-    if snap.values.get("status") == "committing":
+    if _has_uninterrupted_pending_task(snap):
         return await compiled_graph.ainvoke(None, config=config)
     if snap.values.get("approved_plan") is not None:
         await compiled_graph.aupdate_state(config, {"status": "committing", "error": None}, as_node="approval")
@@ -1388,6 +1547,12 @@ async def time_travel_resume(compiled_graph, thread_id: str, target_checkpoint_i
         "configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": target_checkpoint_id}
     }
     forked_config = await compiled_graph.aupdate_state(
-        target_config, {"clarification_answer": note, "clarification_rounds": 0}, as_node="clarify",
+        target_config,
+        # `unanswered_human_note` too, not just `clarification_answer`: this writes state *as if*
+        # `clarify_node` had returned, so anything that node sets has to be set here as well — the node's
+        # own body never runs on this path. Without it a rewind note would silently skip `plan_node`'s
+        # "reply to what the human just told you" step, which is exactly the case that motivated it.
+        {"clarification_answer": note, "unanswered_human_note": note, "clarification_rounds": 0},
+        as_node="clarify",
     )
     return await compiled_graph.ainvoke(None, config=forked_config)

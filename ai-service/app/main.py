@@ -115,10 +115,15 @@ async def lifespan(app: FastAPI):
     sprint_recovery_graph = None
     jira_actions_client = None
     sprint_recovery_kafka_trigger = None
+    # Created before the graph, not alongside the other app.state assignments below, so this
+    # workflow's real token/cost usage can be recorded into the same counters GET /stats and
+    # `agent_cost_usd_total` already report for every other LLM call — see `_call_model`.
+    stats = ServiceStats()
     if settings.sprint_recovery_enabled:
         jira_actions_client = JiraActionsClient(settings.jira_backend_url, settings.internal_gateway_token)
         sprint_recovery_graph = build_sprint_recovery_graph(
             instructor_client, instructor_model, space_membership, retrieval, jira_actions_client,
+            on_usage=stats.record,
         ).compile(checkpointer=checkpointer)
         # See active_threads.py's own docstring: the checkpointer itself has no way to look up "the
         # thread for sprint X" — this is the one small side table that makes crash-resume something a
@@ -142,7 +147,7 @@ async def lifespan(app: FastAPI):
     app.state.llm = llm
     app.state.retrieval = retrieval
     app.state.agent = agent
-    app.state.stats = ServiceStats()
+    app.state.stats = stats
     app.state.cache = cache
     app.state.instructor_client = instructor_client
     app.state.instructor_model = instructor_model

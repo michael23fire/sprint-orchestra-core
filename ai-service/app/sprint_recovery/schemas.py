@@ -78,6 +78,20 @@ class RecoveryPlan(BaseModel):
 
 class RecoveryPlanSet(BaseModel):
     plans: List[RecoveryPlan] = Field(..., min_length=1, max_length=3)
+    # **Found live, from direct product feedback**: a human rewound with "we will add 2 extra engineers
+    # to this sprint" and got back plans that said nothing about engineers. The note *was* used (it
+    # became evidence, and a hypothesis weighed it explicitly and explained why extra capacity can't
+    # move work blocked on an external party) — but nothing in the plan output acknowledged it, so the
+    # only visible outcome was indistinguishable from having been ignored. Telling someone *why* their
+    # input didn't change the answer is part of the interaction, not an optional extra: silence reads
+    # as "not listening." Only requested when there is actually an unanswered note — see plan_node.
+    response_to_human_note: Optional[str] = Field(
+        None,
+        description=(
+            "Direct reply to what the human just told you: what it changed about these plans, or the "
+            "concrete reason it could not change them."
+        ),
+    )
 
 
 class SprintIssueSummary(BaseModel):

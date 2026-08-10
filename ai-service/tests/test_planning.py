@@ -6,6 +6,8 @@ failure degrades to a safe single-issue fallback instead of raising; (3) `valida
 dependency cycles deterministically instead of failing; (4) `allocate_sprints` bin-packs correctly
 both in open-ended (capacity-driven) mode and fixed-sprint-count mode.
 """
+from types import SimpleNamespace
+
 from app.planning.prompts import render_epic_plan_prompt, render_epic_plan_refine_prompt
 from app.planning.schemas import (
     EpicDraft,
@@ -42,6 +44,11 @@ class _FakeCompletions:
         )
         self.calls = []
 
+    # Provider-reported token counts for one fake call. Deliberately non-round numbers that differ from
+    # `_TOKENS_PER_LLM_CALL_ESTIMATE`, so a test asserting on real usage can't accidentally pass
+    # against the flat pre-call estimate the budget guard still uses.
+    fake_usage = SimpleNamespace(prompt_tokens=1234, completion_tokens=567, prompt_tokens_details=None)
+
     async def create(self, **kwargs):
         self.calls.append(kwargs)
         result = self._result
@@ -51,6 +58,13 @@ class _FakeCompletions:
         if isinstance(result, Exception):
             raise result
         return result
+
+    async def create_with_completion(self, **kwargs):
+        """`instructor`'s other entrypoint: same parsed model, plus the raw provider response — which
+        is where the real token counts live (see `_call_model` in app/sprint_recovery/graph.py, which
+        uses this precisely so cost stops being a hardcoded estimate)."""
+        parsed = await self.create(**kwargs)
+        return parsed, SimpleNamespace(usage=self.fake_usage)
 
 
 class _FakeChat:

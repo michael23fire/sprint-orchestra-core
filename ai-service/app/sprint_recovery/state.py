@@ -63,6 +63,18 @@ class SprintRecoveryState(TypedDict):
     human_plan_feedback: Optional[str]
     plan_revision_round: int
     max_plan_revision_rounds: int
+    # What a human just told this workflow (a clarifying answer, a time-travel rewind note, or the
+    # feedback behind a "revise"), held only until `plan_node` has actually answered it. Separate from
+    # `clarification_answer`/`human_plan_feedback`, which persist for the rest of the run: without a
+    # field that gets *cleared*, a later escalation round with no new input would keep re-answering the
+    # same stale note as though it had just been said.
+    unanswered_human_note: Optional[str]
+    # `plan_node`'s direct reply to that note — what it changed, or why it couldn't. **Found live**:
+    # a note that genuinely couldn't change the plan (extra engineers can't unblock work sitting with
+    # an external legal reviewer) produced plans that simply didn't mention it, which is
+    # indistinguishable from the input having been discarded. Always reset per plan_node run, so it
+    # can only ever describe the plans shown next to it.
+    note_response: Optional[str]
 
     # --- Execution (idempotency ledger) ---
     committed_actions: Dict[str, str]  # action_index (str) -> result summary
@@ -86,7 +98,15 @@ class SprintRecoveryState(TypedDict):
     # surfaced as a caveat on an at-risk-looking result, not treated as a reason to distrust a
     # "recovered" one.
     index_catch_up_timed_out: bool
+    # Real provider-reported tokens for this thread, not an estimate — every LLM call goes through
+    # `_call_model`, which reads the counts off the raw completion. The pre-call budget guard
+    # (`_check_budget`) still uses a flat estimate, because nothing can know a call's size before
+    # making it; these two being different numbers is deliberate, not a leftover.
     token_usage: int
+    # Real $ for this thread, priced per model from app/llm/pricing.py. **Found live**: "what does one
+    # run of this cost" was previously unanswerable — `token_usage` was a fixed 4000 added per call, so
+    # any cost derived from it was a guess multiplied by a call count.
+    cost_usd: float
 
     # --- Escalation loop ---
     escalation_round: int
@@ -119,8 +139,9 @@ def initial_recovery_state(
         sprint_snapshot=None,
         plans=[], decision=None, approved_plan=None,
         human_plan_feedback=None, plan_revision_round=0, max_plan_revision_rounds=max_plan_revision_rounds,
+        unanswered_human_note=None, note_response=None,
         committed_actions={}, index_watermarks={}, pre_write_updated_at={},
-        index_catch_up_timed_out=False, token_usage=0,
+        index_catch_up_timed_out=False, token_usage=0, cost_usd=0.0,
         escalation_round=0, completion_forecast_pct=None, prior_committed_actions=[],
         status="diagnosing", error=None,
     )

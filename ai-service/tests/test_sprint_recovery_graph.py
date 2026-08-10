@@ -17,7 +17,9 @@ from langgraph.types import Command
 
 from app.auth.space_membership import NoopSpaceMembershipChecker, SpaceMembershipError
 from app.sprint_recovery import graph as graph_module
+from app.llm.types import Usage
 from app.sprint_recovery.graph import (
+    _TOKENS_PER_LLM_CALL_ESTIMATE,
     _await_index_catch_up,
     _describe_action,
     _detect_risk_signals,
@@ -27,6 +29,7 @@ from app.sprint_recovery.graph import (
     build_sprint_recovery_graph,
     flatten_escalation_summary,
     list_checkpoint_history,
+    plan_node,
     reevaluate_node,
     retry_recovery_commit,
     time_travel_resume,
@@ -643,6 +646,63 @@ async def test_a_genuine_crash_between_a_write_landing_and_the_checkpoint_does_n
                 await conn.execute(
                     f"DELETE FROM planning_workflows.{table} WHERE thread_id = %s", (thread_id,)
                 )
+
+
+async def test_retry_recovery_commit_resumes_a_crash_between_diagnose_and_plan_without_replaying_stale_actions():
+    """**Found live**, via a real UI crash-resume demo: a kill -9 landed between `reevaluate_node`
+    looping back into `diagnose_node` for the next escalation round (which completed and checkpointed)
+    and `plan_node` finishing (which did not). The resulting checkpoint had `status == "diagnosing"`
+    and a real pending task (`next == ("plan",)`), but `approved_plan` still held the *previous*
+    round's plan — already fully committed to Jira, never cleared because nothing between
+    `reevaluate_node` and a completed `plan_node` touches that field.
+
+    Before `is_resumable_after_a_crash`/`_has_uninterrupted_pending_task` existed, `retry_recovery_commit`
+    had no case for `status == "diagnosing"`: it fell through to the `approved_plan is not None` branch,
+    which would have re-armed `commit_one_action_node` against those already-committed actions —
+    reposting the exact same Jira comment a second time. The fix checks LangGraph's own pending-task/
+    interrupt state instead of a status string, so this now takes the plain bare-`ainvoke` resume path
+    and correctly re-enters `plan_node`, not `commit_one_action_node`.
+    """
+    stale_committed_plan = RecoveryPlan(
+        plan_id="plan_a", name="Round 1 plan (already fully committed)", rationale="r", impact_on_goal="n/a",
+        actions=[RecoveryAction(action_type="add_comment", target_issue_key="PAY-142", comment_body="round 1")],
+    )
+    round_2_plans = RecoveryPlanSet(plans=[RecoveryPlan(
+        plan_id="plan_b", name="Round 2 plan", rationale="r", impact_on_goal="n/a",
+        actions=[RecoveryAction(action_type="add_comment", target_issue_key="PAY-142", comment_body="round 2")],
+    )])
+    diagnosis = DiagnosisResult(hypotheses=[_hyp(["ev1"])], overall_confidence="sufficient")
+    client = FakeInstructorClient({DiagnosisResult: [diagnosis], RecoveryPlanSet: [_plan_set(), round_2_plans]})
+    retrieval = FakeRetrieval(issue_rows=list(_AT_RISK_ROWS))
+    jira = FakeJiraActions()
+    graph = _graph(client, retrieval, jira)
+    cfg = _cfg()
+    thread_id = cfg["configurable"]["thread_id"]
+
+    await graph.ainvoke(_state(), config=cfg)  # reaches awaiting_plan_approval, round 0 — no Jira calls yet
+
+    # Simulate the exact live crash: a checkpoint at status="diagnosing" for round 2, with `plan` as
+    # the only pending task, but `approved_plan`/`committed_actions` still reflecting round 1's
+    # already-finished commit — `commit_one_action_node` was never re-entered, this is what
+    # `reevaluate_node` -> `diagnose_node` alone would leave behind if killed right after.
+    await graph.aupdate_state(
+        cfg,
+        {
+            "status": "diagnosing", "escalation_round": 1, "committed_actions": {},
+            "approved_plan": stale_committed_plan, "clarification_question": None,
+        },
+        as_node="diagnose",
+    )
+    snap = await graph.aget_state(cfg)
+    assert snap.next == ("plan",)  # confirms this fixture matches the live bug's exact shape
+
+    result = await retry_recovery_commit(graph, thread_id)
+
+    assert jira.calls == []  # must NOT have re-posted round 1's already-committed comment
+    assert "__interrupt__" in result  # reached awaiting_plan_approval again, this time for round 2
+    final = await graph.aget_state(cfg)
+    assert final.values["status"] == "awaiting_plan_approval"
+    assert final.values["plans"][0].name == "Round 2 plan"  # plan_node actually reran, not a stale replay
 
 
 async def test_retry_after_plan_generation_failure_reenters_plan_instead_of_crashing():
@@ -1398,3 +1458,130 @@ async def test_depends_on_issue_key_never_gets_a_baseline_since_it_never_gets_a_
     }
     fresh_human_update = {"issue_key": "PAY-97", "status": "blocked", "updated_at": "2026-08-08T00:00:00Z"}
     assert _last_update_not_by_this_workflow(fresh_human_update, own_writes) == "2026-08-08T00:00:00Z"
+
+
+async def test_plan_node_answers_a_human_note_directly_and_does_not_re_answer_it_next_round():
+    """**Found live, from direct product feedback**: a human rewound with "we will add 2 extra
+    engineers to this sprint" and got back plans that never mentioned engineers. The note had genuinely
+    been used (it became evidence, and a hypothesis weighed it explicitly) — but nothing in the plan
+    output acknowledged it, which is indistinguishable from the input having been thrown away. Telling
+    someone *why* their input can't change the answer is part of the interaction, not an extra.
+
+    Also locks in the staleness half, which is the easy thing to get wrong: `clarification_answer`
+    persists in state for the rest of the run, so a later round with nobody saying anything must NOT
+    keep re-answering the same note as though it had just been said. `unanswered_human_note` is the
+    field that gets cleared; `note_response` is reset per run so it can only describe the plans beside it.
+    """
+    answered = RecoveryPlanSet(
+        plans=_plan_set().plans,
+        response_to_human_note=(
+            "Adding two engineers won't help here — all three tickets are waiting on external parties, "
+            "so there's no engineering work for them to pick up."
+        ),
+    )
+    later_round = RecoveryPlanSet(plans=_plan_set().plans)  # no note outstanding, so no reply requested
+    diagnosis_unsure = DiagnosisResult(
+        hypotheses=[_hyp(["ev1"], confidence="low")], overall_confidence="insufficient",
+        clarifying_question="Is this genuinely blocked?",
+    )
+    diagnosis_sure = DiagnosisResult(hypotheses=[_hyp(["ev1"])], overall_confidence="sufficient")
+    client = FakeInstructorClient({
+        DiagnosisResult: [diagnosis_unsure, diagnosis_sure],
+        RecoveryPlanSet: [answered, later_round],
+    })
+    graph = _graph(client, FakeRetrieval(issue_rows=list(_AT_RISK_ROWS)), FakeJiraActions())
+    cfg = _cfg()
+
+    await graph.ainvoke(_state(), config=cfg)  # pauses at clarify
+    await graph.ainvoke(Command(resume={"answer": "we will add 2 extra engineers"}), config=cfg)
+
+    snap = await graph.aget_state(cfg)
+    assert snap.values["status"] == "awaiting_plan_approval"
+    assert "Adding two engineers won't help" in snap.values["note_response"]
+    # Answered — so it must not be re-answered on any later run.
+    assert snap.values["unanswered_human_note"] is None
+    # The prompt only asks for a reply when a note is actually outstanding.
+    plan_prompts = [
+        c["messages"][0]["content"] for c in client.completions.calls
+        if c["response_model"] is RecoveryPlanSet
+    ]
+    assert "we will add 2 extra engineers" in plan_prompts[0]
+    assert "response_to_human_note" in plan_prompts[0]
+
+    # Re-plan with nothing new said — `clarification_answer` is still sitting in state from before, so
+    # this is exactly the case where reading that field instead of the cleared one would re-answer a
+    # note nobody just gave. The reply must come back `None`, and the prompt must not ask for one.
+    assert snap.values["clarification_answer"] == "we will add 2 extra engineers"  # still there
+    replanned = await plan_node(
+        dict(snap.values), client, "fake-model", FakeRetrieval(issue_rows=list(_AT_RISK_ROWS)),
+    )
+    assert replanned["note_response"] is None
+    latest_plan_prompt = [
+        c["messages"][0]["content"] for c in client.completions.calls
+        if c["response_model"] is RecoveryPlanSet
+    ][-1]
+    assert "response_to_human_note" not in latest_plan_prompt
+
+
+async def test_token_usage_and_cost_are_measured_from_the_provider_not_estimated():
+    """**Found live, from a direct question about what a run of this workflow costs**: every node used
+    to advance `token_usage` by a flat `_TOKENS_PER_LLM_CALL_ESTIMATE` (4000), so the reported number
+    was a guess multiplied by a call count and any cost derived from it was fiction. `_call_model` now
+    reads the real counts off the raw completion (`create_with_completion`) and prices them per model.
+
+    The pre-call budget guard still uses the flat estimate on purpose — nothing can know a call's size
+    before making it — so this asserts the *recorded* number is the measured one, which is exactly the
+    distinction that was collapsed before.
+    """
+    diagnosis = DiagnosisResult(hypotheses=[_hyp(["ev1"])], overall_confidence="sufficient")
+    client = _client(diagnosis, _plan_set())
+    recorded: list = []
+    graph = build_sprint_recovery_graph(
+        client, "gpt-5.6-luna", NoopSpaceMembershipChecker(),
+        FakeRetrieval(issue_rows=list(_AT_RISK_ROWS)), FakeJiraActions(),
+        on_usage=lambda usage, cost: recorded.append((usage, cost)),
+    ).compile(checkpointer=InMemorySaver())
+    cfg = _cfg()
+
+    await graph.ainvoke(_state(), config=cfg)
+    snap = await graph.aget_state(cfg)
+
+    # Two real LLM calls (diagnose + plan), each reporting 1234 in / 567 out — see _FakeCompletions.
+    assert len(recorded) == 2
+    assert snap.values["token_usage"] == 2 * (1234 + 567)
+    assert snap.values["token_usage"] % _TOKENS_PER_LLM_CALL_ESTIMATE != 0  # not the old flat estimate
+    # gpt-5.6-luna: $0.20/1M input, $1.20/1M output — the price actually on the pricing page, which the
+    # table had wrong (5x too high) until this was checked.
+    expected = 2 * ((1234 / 1_000_000) * 0.20 + (567 / 1_000_000) * 1.20)
+    assert snap.values["cost_usd"] == pytest.approx(expected)
+    assert sum(cost for _, cost in recorded) == pytest.approx(expected)
+
+
+def test_openai_cached_input_tokens_are_not_double_counted_as_fresh_input():
+    """OpenAI reports `prompt_tokens` *inclusive* of cached tokens while Anthropic reports them
+    separately, and cached input is billed at a tenth of fresh input — folding the two together would
+    overstate the cached portion by 10x. Normalizing at the boundary keeps one pricing path correct for
+    both providers.
+    """
+    from types import SimpleNamespace
+
+    completion = SimpleNamespace(usage=SimpleNamespace(
+        prompt_tokens=1000, completion_tokens=100,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=800),
+    ))
+
+    usage = graph_module._usage_from_completion(completion)
+
+    assert usage.input_tokens == 200  # the genuinely fresh portion
+    assert usage.cache_read_input_tokens == 800
+    assert usage.output_tokens == 100
+
+
+def test_a_provider_reporting_no_usage_degrades_to_free_rather_than_raising():
+    """A bare llama.cpp server reports no usage block at all. Cost visibility must never be the thing
+    that breaks a real workflow — see app/llm/types.py's Usage. Token accounting falls back to the flat
+    estimate so the budget ceiling stays enforceable instead of silently becoming infinite."""
+    from types import SimpleNamespace
+
+    assert graph_module._usage_from_completion(SimpleNamespace(usage=None)) == Usage()
+    assert graph_module._usage_from_completion(SimpleNamespace()) == Usage()
