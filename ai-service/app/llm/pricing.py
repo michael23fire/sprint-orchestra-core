@@ -57,10 +57,18 @@ _ANTHROPIC_PRICING = {
 # app/llm/openai_compatible_client.py's module docstring. Long-context and Batch/Flex/Priority tiers
 # exist too (roughly 2x short-context input/output for long context; Batch is ~50% of Standard) but
 # aren't modeled here — this project's calls are short-context, interactive (not batch) traffic.
+#
+# **Found live, re-checked against the pricing page on 2026-08-10**: two rows were wrong, and one of
+# them was the model this project actually runs (`gpt-5.6-luna`, see AI_AGENT_MODEL) — it was priced
+# at $1.00/$6.00 when the real Standard short-context rate is $0.20/$1.20, a 5x overstatement on every
+# cost number this service reported. `gpt-5.6-terra` was likewise $2.50/$15.00 against a real
+# $2.00/$12.00. Exactly the silent-drift failure mode `price_for_model`'s docstring warns about,
+# except overstating rather than understating; the fix is the same (update the table) but it is worth
+# recording that a hardcoded table did drift in practice, not just in principle.
 _OPENAI_PRICING = {
     "gpt-5.6-sol": ModelPrice(5.00, 30.00),
-    "gpt-5.6-terra": ModelPrice(2.50, 15.00),
-    "gpt-5.6-luna": ModelPrice(1.00, 6.00),
+    "gpt-5.6-terra": ModelPrice(2.00, 12.00),
+    "gpt-5.6-luna": ModelPrice(0.20, 1.20),
     "gpt-5.5": ModelPrice(5.00, 30.00),
     "gpt-5.5-pro": ModelPrice(30.00, 180.00),
     "gpt-5.4": ModelPrice(2.50, 15.00),
