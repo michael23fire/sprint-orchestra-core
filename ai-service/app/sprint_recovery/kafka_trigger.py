@@ -5,15 +5,16 @@ group_id on the same topic gets its own full copy of every message and does not 
 duplicate vectorization-service's own consumption. This graph does not invent new event
 infrastructure, it taps into infrastructure that already exists and is already proven reliable.
 
-**Known limitation, stated plainly, same shape as the rollout workflow's own "you can't rediscover a
-pending workflow without its thread_id" gap**: `_waiting_by_sprint` is an in-process dict, not a
-persisted registry. A workflow paused at `wait_for_reevaluation` is only findable by this consumer for
-as long as the *same* ai-service process that started it is still running — an ai-service restart
-loses the (sprint_id -> thread_ids) index, even though the underlying Postgres checkpoint itself is
-completely intact and resumable via the manual "re-check now" trigger regardless. A real production
-version would persist this index (the same kind of lightweight registry table already named as a real,
-not-yet-built gap for the rollout workflow) — not built here, for the same reason: it's an
-availability/discoverability concern, not a data-safety one.
+**Found live, and fixed — this used to be a stated known limitation**: `_waiting_by_sprint` was an
+in-process dict only. A workflow paused at `wait_for_reevaluation` was findable by this consumer just
+for as long as the *same* ai-service process that started it stayed alive; a restart (deploy, crash,
+OOM) lost the (sprint_id -> thread_ids) index even though the Postgres checkpoint itself was entirely
+intact. The workflow didn't fail — it went permanently deaf, which is the worse failure mode, since
+nothing surfaces as an error and the sprint simply never gets re-checked automatically again. In a
+system whose whole premise is durable execution, an index that only lives in RAM is the one component
+that isn't durable. The dicts below are now a *cache* of
+`active_threads.py`'s `sprint_recovery_waiting_threads` table: written through on register/unregister,
+and rebuilt from it on `start()`. See `db_url` in `__init__`.
 
 **Found live, a cross-tenant version of the same class of bug**: `_handle` used to loop over *every*
 sprint in `_waiting_by_sprint`, regardless of which space (tenant) the incoming event's issue actually
@@ -43,6 +44,11 @@ from typing import Dict, Optional, Set
 from aiokafka import AIOKafkaConsumer
 
 from app.observability import SPRINT_RECOVERY_INDEX_CATCH_UP_TIMEOUTS_TOTAL
+from app.sprint_recovery.active_threads import (
+    clear_waiting_thread,
+    load_waiting_threads,
+    register_waiting_thread,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +56,12 @@ logger = logging.getLogger(__name__)
 class SprintRecoveryKafkaTrigger:
     def __init__(
         self, bootstrap_servers: str, topic: str, group_id: str, compiled_graph,
-        escalation_webhook_url: Optional[str] = None,
+        escalation_webhook_url: Optional[str] = None, db_url: Optional[str] = None,
     ):
+        # Where the waiting-thread index is persisted so it survives a restart (see module docstring).
+        # Optional: with no checkpoint database configured there is no durable workflow to index in the
+        # first place, so the in-memory dicts alone are the honest behaviour rather than a downgrade.
+        self._db_url = db_url
         self._bootstrap_servers = bootstrap_servers
         self._topic = topic
         self._group_id = group_id
@@ -77,18 +87,52 @@ class SprintRecoveryKafkaTrigger:
         self.events_processed = 0
         self.workflows_triggered = 0
 
-    def register_waiting(
+    async def register_waiting(
         self, space_id: int, sprint_id: int, thread_id: str, tracked_issue_keys: Optional[Set[str]] = None,
     ) -> None:
+        keys = set(tracked_issue_keys or ())
+        self._remember(space_id, sprint_id, thread_id, keys)
+        if self._db_url:
+            try:
+                await register_waiting_thread(self._db_url, space_id, sprint_id, thread_id, keys)
+            except Exception:  # noqa: BLE001 - see _unregister: durability of the *index* is best-effort
+                logger.exception("failed persisting waiting sprint-recovery thread %s", thread_id)
+
+    def _remember(self, space_id: int, sprint_id: int, thread_id: str, keys: Set[str]) -> None:
         self._waiting_by_sprint.setdefault(sprint_id, set()).add(thread_id)
         self._space_by_sprint[sprint_id] = space_id
-        self._tracked_issue_keys_by_thread[thread_id] = set(tracked_issue_keys or ())
+        self._tracked_issue_keys_by_thread[thread_id] = keys
 
-    def _unregister(self, sprint_id: int, thread_id: str) -> None:
+    async def _unregister(self, sprint_id: int, thread_id: str) -> None:
         self._waiting_by_sprint.get(sprint_id, set()).discard(thread_id)
         self._tracked_issue_keys_by_thread.pop(thread_id, None)
+        if self._db_url:
+            try:
+                await clear_waiting_thread(self._db_url, thread_id)
+            except Exception:  # noqa: BLE001 - a stale row costs one redundant re-check, never data loss
+                logger.exception("failed clearing waiting sprint-recovery thread %s", thread_id)
+
+    async def _rehydrate(self) -> None:
+        """Rebuilds the in-memory index from Postgres, so threads parked before this process started
+        are still wakeable by an event. Best-effort by design: failing to read the index must not stop
+        the consumer from starting and serving every *new* pause correctly."""
+        if not self._db_url:
+            return
+        try:
+            rows = await load_waiting_threads(self._db_url)
+        except Exception:  # noqa: BLE001
+            logger.exception("failed reloading waiting sprint-recovery threads; only new pauses will be tracked")
+            return
+        for space_id, sprint_id, thread_id, keys in rows:
+            self._remember(space_id, sprint_id, thread_id, set(keys))
+        if rows:
+            logger.info(
+                "sprint-recovery kafka trigger reloaded waiting threads from the previous process",
+                extra={"threads": len(rows), "sprints": len({r[1] for r in rows})},
+            )
 
     async def start(self) -> None:
+        await self._rehydrate()
         self._consumer = AIOKafkaConsumer(
             self._topic, bootstrap_servers=self._bootstrap_servers, group_id=self._group_id,
             enable_auto_commit=True, auto_offset_reset="latest",
@@ -164,7 +208,7 @@ class SprintRecoveryKafkaTrigger:
                 # This specific `wait_for_reevaluation` pause is consumed either way (a future
                 # escalation round re-registers via a fresh register_waiting call once it reaches that
                 # node again) — nothing here can double-trigger the same pause a second time.
-                self._unregister(sprint_id, thread_id)
+                await self._unregister(sprint_id, thread_id)
 
     async def stop(self) -> None:
         if self._task:

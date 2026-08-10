@@ -6,7 +6,10 @@ the changed issue actually had anything to do with a given waiting workflow's sp
 in both fixes rather than just checking "trigger_reevaluation got called at some point."
 """
 import json
+import uuid
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from app.sprint_recovery.kafka_trigger import SprintRecoveryKafkaTrigger
 
@@ -20,8 +23,8 @@ def _trigger() -> SprintRecoveryKafkaTrigger:
 
 async def test_event_only_resumes_waiting_workflows_in_the_same_space():
     trigger = _trigger()
-    trigger.register_waiting(space_id=5000014, sprint_id=7, thread_id="thread-a")
-    trigger.register_waiting(space_id=5000099, sprint_id=99, thread_id="thread-b")
+    await trigger.register_waiting(space_id=5000014, sprint_id=7, thread_id="thread-a")
+    await trigger.register_waiting(space_id=5000099, sprint_id=99, thread_id="thread-b")
 
     reevaluate_mock = AsyncMock(return_value={"status": "recovered", "space_id": 5000014, "sprint_name": "Sprint 7"})
     with patch("app.sprint_recovery.graph.trigger_reevaluation", new=reevaluate_mock):
@@ -36,7 +39,7 @@ async def test_event_only_resumes_waiting_workflows_in_the_same_space():
 
 async def test_event_for_a_space_with_nothing_waiting_triggers_nothing():
     trigger = _trigger()
-    trigger.register_waiting(space_id=5000014, sprint_id=7, thread_id="thread-a")
+    await trigger.register_waiting(space_id=5000014, sprint_id=7, thread_id="thread-a")
 
     reevaluate_mock = AsyncMock()
     with patch("app.sprint_recovery.graph.trigger_reevaluation", new=reevaluate_mock):
@@ -51,7 +54,7 @@ async def test_event_for_an_unrelated_issue_in_the_same_space_and_sprint_id_mism
     """Same space, but the event's sprintId belongs to a different sprint in that space, and the issue
     isn't one this thread is tracking — must not trigger just because the space matched."""
     trigger = _trigger()
-    trigger.register_waiting(space_id=1, sprint_id=7, thread_id="thread-a", tracked_issue_keys={"ATC-77"})
+    await trigger.register_waiting(space_id=1, sprint_id=7, thread_id="thread-a", tracked_issue_keys={"ATC-77"})
 
     reevaluate_mock = AsyncMock()
     with patch("app.sprint_recovery.graph.trigger_reevaluation", new=reevaluate_mock):
@@ -68,7 +71,7 @@ async def test_move_out_of_sprint_self_trigger_matches_via_tracked_issue_key_not
     issue-key fallback.
     """
     trigger = _trigger()
-    trigger.register_waiting(space_id=1, sprint_id=7, thread_id="thread-a", tracked_issue_keys={"ATC-80"})
+    await trigger.register_waiting(space_id=1, sprint_id=7, thread_id="thread-a", tracked_issue_keys={"ATC-80"})
 
     reevaluate_mock = AsyncMock(return_value={"status": "recovered", "space_id": 1, "sprint_name": "Sprint 7"})
     with patch("app.sprint_recovery.graph.trigger_reevaluation", new=reevaluate_mock):
@@ -76,3 +79,65 @@ async def test_move_out_of_sprint_self_trigger_matches_via_tracked_issue_key_not
 
     reevaluate_mock.assert_awaited_once()
     assert reevaluate_mock.await_args.args[1] == "thread-a"
+
+
+async def test_a_waiting_thread_survives_a_process_restart_and_is_still_wakeable_by_an_event():
+    """**Found live, and the last real durability hole in a workflow whose whole premise is durable
+    execution**: the waiting-thread index was an in-process dict. A sprint parked at
+    `wait_for_reevaluation` was reachable by Kafka events only while the *same* ai-service process
+    stayed alive — restart it and the Postgres checkpoint was still perfectly intact, but nothing would
+    ever wake it automatically again. It didn't fail loudly; it went permanently deaf, which is worse.
+
+    Simulated the same way the crash-resume tests simulate a crash: two completely independent trigger
+    objects sharing nothing but the Postgres row. Trigger 1 registers and is then thrown away
+    (the "process died" step); trigger 2 starts cold, and the event still has to land.
+    """
+    psycopg = pytest.importorskip("psycopg")
+    db_url = "postgresql://poc:poc123@localhost:5432/pocdb"
+    try:
+        conn = await psycopg.AsyncConnection.connect(db_url, connect_timeout=2)
+        await conn.close()
+    except Exception:
+        pytest.skip("dev Postgres (poc-postgres) not reachable")
+
+    from app.sprint_recovery.active_threads import (
+        clear_waiting_thread,
+        ensure_waiting_threads_table,
+        load_waiting_threads,
+    )
+
+    await ensure_waiting_threads_table(db_url)
+    thread_id = f"restart-test-{uuid.uuid4()}"
+    space_id, sprint_id = 5_000_777, 7_000_777
+    try:
+        # --- process 1: a workflow reaches wait_for_reevaluation, then the process goes away ---
+        dead_trigger = SprintRecoveryKafkaTrigger(
+            bootstrap_servers="", topic="", group_id="", compiled_graph=object(), db_url=db_url,
+        )
+        await dead_trigger.register_waiting(
+            space_id=space_id, sprint_id=sprint_id, thread_id=thread_id, tracked_issue_keys={"ATC-900"},
+        )
+        del dead_trigger  # nothing of process 1 survives except the Postgres row
+
+        # --- process 2: cold start, no memory of anything ---
+        restarted = SprintRecoveryKafkaTrigger(
+            bootstrap_servers="", topic="", group_id="", compiled_graph=object(), db_url=db_url,
+        )
+        assert restarted._waiting_by_sprint == {}  # genuinely knows nothing yet
+        await restarted._rehydrate()
+
+        reevaluate_mock = AsyncMock(
+            return_value={"status": "recovered", "space_id": space_id, "sprint_name": "S"},
+        )
+        with patch("app.sprint_recovery.graph.trigger_reevaluation", new=reevaluate_mock):
+            await restarted._handle(json.dumps(
+                {"issueKey": "ATC-900", "spaceId": space_id, "sprintId": sprint_id}
+            ).encode())
+
+        reevaluate_mock.assert_awaited_once()
+        assert reevaluate_mock.await_args.args[1] == thread_id, "a restarted process must still wake it"
+        # Consuming the pause clears the durable row too — a stale one would cause a pointless
+        # re-check of a thread that has already moved on.
+        assert thread_id not in {r[2] for r in await load_waiting_threads(db_url)}
+    finally:
+        await clear_waiting_thread(db_url, thread_id)

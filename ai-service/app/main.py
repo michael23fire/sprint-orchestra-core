@@ -28,7 +28,10 @@ from app.planning.checkpoint import build_checkpointer
 from app.planning.graph import build_planning_graph
 from app.planning.jira_commit_client import JiraCommitClient
 from app.planning.rollout_graph import build_rollout_graph
-from app.sprint_recovery.active_threads import ensure_active_threads_table
+from app.sprint_recovery.active_threads import (
+    ensure_active_threads_table,
+    ensure_waiting_threads_table,
+)
 from app.sprint_recovery.graph import build_sprint_recovery_graph
 from app.sprint_recovery.jira_actions_client import JiraActionsClient
 from app.sprint_recovery.kafka_trigger import SprintRecoveryKafkaTrigger
@@ -123,11 +126,15 @@ async def lifespan(app: FastAPI):
         # technically resume if you already have the thread_id.
         if checkpoint_db_url is not None:
             await ensure_active_threads_table(checkpoint_db_url)
+            await ensure_waiting_threads_table(checkpoint_db_url)
         if settings.sprint_recovery_kafka_enabled:
             sprint_recovery_kafka_trigger = SprintRecoveryKafkaTrigger(
                 settings.kafka_bootstrap_servers, settings.kafka_content_topic,
                 settings.sprint_recovery_kafka_group_id, sprint_recovery_graph,
                 escalation_webhook_url=settings.sprint_recovery_escalation_webhook_url,
+                # Without this the consumer would only ever know about pauses created by *this*
+                # process — see kafka_trigger.py's docstring on the restart-deafness bug.
+                db_url=checkpoint_db_url,
             )
             await sprint_recovery_kafka_trigger.start()
 

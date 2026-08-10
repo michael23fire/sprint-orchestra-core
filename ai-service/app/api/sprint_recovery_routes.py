@@ -62,7 +62,7 @@ async def _register_active_thread_if_configured(request: Request, space_id: int,
         logger.exception("failed to register active sprint-recovery thread (space=%s, sprint=%s)", space_id, sprint_id)
 
 
-def _register_if_waiting(request: Request, sprint_id: int, thread_id: str, values: dict) -> None:
+async def _register_if_waiting(request: Request, sprint_id: int, thread_id: str, values: dict) -> None:
     """Tells the Kafka trigger consumer (if running) to watch for events relevant to this sprint the
     moment a workflow actually reaches `wait_for_reevaluation` — see kafka_trigger.py's own docstring
     for why this in-process registration doesn't survive an ai-service restart, a known, named gap.
@@ -78,7 +78,7 @@ def _register_if_waiting(request: Request, sprint_id: int, thread_id: str, value
                 tracked.add(action.target_issue_key)
                 if action.depends_on_issue_key:
                     tracked.add(action.depends_on_issue_key)
-        trigger.register_waiting(values["space_id"], sprint_id, thread_id, tracked)
+        await trigger.register_waiting(values["space_id"], sprint_id, thread_id, tracked)
 
 
 async def _auto_reevaluate_after_commit(graph, thread_id: str, values: dict) -> dict:
@@ -415,7 +415,7 @@ async def clarify_recovery_endpoint(thread_id: str, req: ClarifyRequest, request
         raise HTTPException(status_code=409, detail=f"rollout {thread_id} is not awaiting clarification")
     await graph.ainvoke(Command(resume={"answer": req.answer}), config=config)
     final = await graph.aget_state(config)
-    _register_if_waiting(request, snap.values["sprint_id"], thread_id, final.values)
+    await _register_if_waiting(request, snap.values["sprint_id"], thread_id, final.values)
     return _status_response(thread_id, final.values)
 
 
@@ -444,7 +444,7 @@ async def clarify_recovery_stream_endpoint(thread_id: str, req: ClarifyRequest, 
             yield _sse("error", {"detail": "sprint recovery request failed"})
             return
         final = await graph.aget_state(config)
-        _register_if_waiting(request, sprint_id, thread_id, final.values)
+        await _register_if_waiting(request, sprint_id, thread_id, final.values)
         yield _sse("result", _status_response(thread_id, final.values).model_dump(by_alias=True))
 
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -518,7 +518,7 @@ async def submit_recovery_decision_endpoint(
     await graph.ainvoke(Command(resume=resume_payload), config=config)
     final = await graph.aget_state(config)
     final_values = await _auto_reevaluate_after_commit(graph, thread_id, final.values)
-    _register_if_waiting(request, snap.values["sprint_id"], thread_id, final_values)
+    await _register_if_waiting(request, snap.values["sprint_id"], thread_id, final_values)
     await _notify_if_escalated(request, thread_id, snap.values["sprint_id"], final_values)
     _track_index_lag_if_timed_out(final_values)
     return await _status_response_with_summary(thread_id, final_values, graph)
@@ -559,7 +559,7 @@ async def submit_recovery_decision_stream_endpoint(
             yield _sse("error", {"detail": "sprint recovery request failed"})
             return
         final = await graph.aget_state(config)
-        _register_if_waiting(request, sprint_id, thread_id, final.values)
+        await _register_if_waiting(request, sprint_id, thread_id, final.values)
         await _notify_if_escalated(request, thread_id, sprint_id, final.values)
         _track_index_lag_if_timed_out(final.values)
         yield _sse("result", (await _status_response_with_summary(thread_id, final.values, graph)).model_dump(by_alias=True))
@@ -582,7 +582,7 @@ async def retry_recovery_endpoint(thread_id: str, request: Request) -> RecoveryS
         )
     await retry_recovery_commit(graph, thread_id)
     final = await graph.aget_state(config)
-    _register_if_waiting(request, snap.values["sprint_id"], thread_id, final.values)
+    await _register_if_waiting(request, snap.values["sprint_id"], thread_id, final.values)
     return _status_response(thread_id, final.values)
 
 
@@ -609,7 +609,7 @@ async def trigger_reevaluation_endpoint(thread_id: str, request: Request) -> Rec
         return await _status_response_with_summary(thread_id, snap.values, graph)
     await trigger_reevaluation(graph, thread_id, source="manual")
     final = await graph.aget_state(config)
-    _register_if_waiting(request, snap.values["sprint_id"], thread_id, final.values)
+    await _register_if_waiting(request, snap.values["sprint_id"], thread_id, final.values)
     await _notify_if_escalated(request, thread_id, snap.values["sprint_id"], final.values)
     _track_index_lag_if_timed_out(final.values)
     return await _status_response_with_summary(thread_id, final.values, graph)
@@ -648,7 +648,7 @@ async def trigger_reevaluation_stream_endpoint(thread_id: str, request: Request)
             yield _sse("error", {"detail": str(exc)})
             return
         final = await graph.aget_state(config)
-        _register_if_waiting(request, sprint_id, thread_id, final.values)
+        await _register_if_waiting(request, sprint_id, thread_id, final.values)
         await _notify_if_escalated(request, thread_id, sprint_id, final.values)
         _track_index_lag_if_timed_out(final.values)
         yield _sse("result", (await _status_response_with_summary(thread_id, final.values, graph)).model_dump(by_alias=True))
