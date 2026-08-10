@@ -26,7 +26,7 @@ class EvidenceItem(BaseModel):
 class RiskSignal(BaseModel):
     """A *deterministic* fact about the sprint — computed by code (query_issues/query_issue_history
     results), never guessed by the model. This is the "code computes, LLM explains" split every other
-    feature in this codebase already uses (`sprint_health`, `PlanCritique`), applied here."""
+    feature in this codebase already uses (`sprint_pace`, `PlanCritique`), applied here."""
 
     issue_key: Optional[str] = None
     signal_type: Literal[

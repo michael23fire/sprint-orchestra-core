@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 _MAX_VALIDATION_RETRIES = 2
 _MAX_OUTPUT_TOKENS = 8000
 # The critic emits four short evidence lists, not a full epic decomposition — so it gets
-# app/sprint_health/service.py's smaller budget rather than reusing the 8000 above, which was sized
+# app/sprint_pace/service.py's smaller budget rather than reusing the 8000 above, which was sized
 # for the whole plan.
 _MAX_REVIEW_OUTPUT_TOKENS = 2000
 

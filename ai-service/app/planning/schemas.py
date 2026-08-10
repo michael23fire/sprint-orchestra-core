@@ -110,7 +110,7 @@ class PlanCritique(BaseModel):
     answer (a real gap listed, verdict still "approved"). Whether the plan needs another revision
     round is instead computed from these lists by `app.planning.service.plan_needs_revision`, a plain,
     independently unit-tested function — the same "LLM lists evidence, code computes the verdict"
-    split `app.sprint_health.service`'s risk-level handling already uses.
+    split `app.sprint_pace.service`'s risk-level handling already uses.
 
     Every list field follows this codebase's existing Optional/List convention throughout
     `IssueDraft`: an empty list is a correct, positive statement that nothing of that kind was found —

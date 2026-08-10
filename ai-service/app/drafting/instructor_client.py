@@ -60,7 +60,7 @@ def _rewrite_max_tokens(request: httpx.Request) -> httpx.Request:
     Found live, not by inspection: with this project configured against its real hosted production
     model (`AI_LLM_PROVIDER=openai_compatible`, `AI_AGENT_MODEL=gpt-5.6-luna`,
     `AI_OPENAI_BASE_URL=https://api.openai.com/v1`), *every* structured-output feature — Plan Epic,
-    Draft Task, Sprint Health — was returning a 400 ("Unsupported parameter: 'max_tokens' is not
+    Draft Task, Sprint Pace — was returning a 400 ("Unsupported parameter: 'max_tokens' is not
     supported with this model. Use 'max_completion_tokens' instead.") and silently falling back to its
     degraded path. Nothing crashed and nothing 500'd, because each of those callers is deliberately
     written to degrade rather than fail — which is correct behaviour that also happened to hide a

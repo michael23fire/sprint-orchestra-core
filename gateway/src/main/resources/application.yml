@@ -221,14 +221,14 @@ spring:
           metadata:
             response-timeout: ${GATEWAY_AI_SEARCH_RESPONSE_TIMEOUT_MS:15000}
             connect-timeout: ${GATEWAY_HTTP_CONNECT_TIMEOUT_MS:5000}
-        # Sprint health readout (POST /sprint-health -> one Instructor+Pydantic call over stats the
-        # caller already computed, see app/sprint_health/schemas.py). Same latency profile as
+        # Sprint pace readout (POST /sprint-pace -> one Instructor+Pydantic call over stats the
+        # caller already computed, see app/sprint_pace/schemas.py). Same latency profile as
         # /draft-task (single LLM call over compact input), so it shares that breaker/timeout rather
         # than getting its own — unlike /plan-epic, which genuinely needs more headroom.
-        - id: ai-service-sprint-health
+        - id: ai-service-sprint-pace
           uri: ${AI_SERVICE_URL:http://127.0.0.1:8200}
           predicates:
-            - Path=/api/ai/sprint-health
+            - Path=/api/ai/sprint-pace
           filters:
             - StripPrefix=2
             - name: CircuitBreaker

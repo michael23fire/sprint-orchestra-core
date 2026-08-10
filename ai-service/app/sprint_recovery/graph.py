@@ -104,6 +104,7 @@ _SIGNAL_LABELS = {
 _ISSUE_KEY_RE = re.compile(r"\b[A-Z][A-Z0-9]*-\d+\b", re.IGNORECASE)
 
 from app.auth.space_membership import SpaceMembershipChecker, SpaceMembershipError
+from app.llm.instructor_usage import usage_from_completion
 from app.llm.pricing import estimate_cost_usd
 from app.llm.types import Usage
 from app.sprint_recovery.jira_actions_client import JiraActionError, JiraActionsClient
@@ -145,43 +146,12 @@ def _check_budget(state: SprintRecoveryState) -> bool:
     return state["token_usage"] + _TOKENS_PER_LLM_CALL_ESTIMATE <= state["max_token_budget"]
 
 
-def _usage_from_completion(completion) -> Usage:
-    """Normalizes whatever the provider returned alongside a structured response into `Usage`.
-
-    Anthropic reports `input_tokens`/`output_tokens` (plus cache counters); OpenAI-compatible servers
-    report `prompt_tokens`/`completion_tokens`, with cached input under
-    `prompt_tokens_details.cached_tokens`. Both shapes are read here rather than in each caller so the
-    two `create_with_completion` sites below stay about diagnosis and planning, not billing wire
-    formats. Anything missing counts as 0: a local server that reports no usage at all (a bare
-    llama.cpp) must degrade to "free and unmeasured", never to an exception — same principle
-    `app/llm/types.py`'s `Usage` already documents.
-    """
-    raw = getattr(completion, "usage", None)
-    if raw is None:
-        return Usage()
-
-    def _int(*names: str) -> int:
-        for name in names:
-            value = getattr(raw, name, None)
-            if isinstance(value, (int, float)):
-                return int(value)
-        return 0
-
-    cached = 0
-    details = getattr(raw, "prompt_tokens_details", None)
-    if details is not None and isinstance(getattr(details, "cached_tokens", None), (int, float)):
-        cached = int(details.cached_tokens)
-    input_tokens = _int("input_tokens", "prompt_tokens")
-    return Usage(
-        # OpenAI's `prompt_tokens` is inclusive of cached tokens; Anthropic's `input_tokens` excludes
-        # them (they're reported separately). Subtracting here keeps the two providers priced the same
-        # way — cached input is billed at a tenth of fresh input, so folding them together would
-        # overstate cost by ~10x on the cached portion.
-        input_tokens=max(0, input_tokens - cached) if cached else input_tokens,
-        output_tokens=_int("output_tokens", "completion_tokens"),
-        cache_creation_input_tokens=_int("cache_creation_input_tokens"),
-        cache_read_input_tokens=_int("cache_read_input_tokens") or cached,
-    )
+# Extracted to app/llm/instructor_usage.py — **found live**: this exact normalization existed a
+# second time in app/sprint_pace/service.py, written independently, with a real behavioral gap
+# between the two copies (that one never accounted for OpenAI's `prompt_tokens_details.cached_tokens`,
+# so it overstated cost on cached-input calls against an OpenAI-compatible provider). Aliased under
+# the old name so every call site and test below is unchanged.
+_usage_from_completion = usage_from_completion
 
 
 async def _call_model(
@@ -464,7 +434,7 @@ async def _detect_risk_signals(
     retrieval, space_id: int, sprint_id: int, own_writes: Optional[Dict[str, tuple]] = None,
 ) -> List[RiskSignal]:
     """Deterministic — code computes this, never the LLM (same "code computes, LLM explains" split
-    `app/sprint_health/service.py` and `app/planning/graph.py`'s critic already use). Chosen because
+    `app/sprint_pace/service.py` and `app/planning/graph.py`'s critic already use). Chosen because
     all are directly computable from `query_issues`/`query_sprints`'s existing fields without
     inventing data this project doesn't have (e.g. no assignee-workload signal — `IssueRowOut` carries
     no assignee field, so that signal type stays in the schema as an LLM-inferable-from-evidence

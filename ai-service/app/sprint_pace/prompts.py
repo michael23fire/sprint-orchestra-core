@@ -1,11 +1,11 @@
-"""Jinja2 prompt rendering for sprint health readouts. Same setup as app/planning/prompts.py."""
+"""Jinja2 prompt rendering for sprint pace readouts. Same setup as app/planning/prompts.py."""
 from __future__ import annotations
 
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from app.sprint_health.schemas import SprintStats
+from app.sprint_pace.schemas import SprintStats
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 _env = Environment(
@@ -16,8 +16,8 @@ _env = Environment(
 )
 
 
-def render_sprint_health_system_prompt() -> str:
-    return _env.get_template("sprint_health_system.jinja").render()
+def render_sprint_pace_system_prompt() -> str:
+    return _env.get_template("sprint_pace_system.jinja").render()
 
 
 def render_sprint_stats_message(stats: SprintStats) -> str:

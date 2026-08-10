@@ -1,4 +1,4 @@
-"""Sprint health readout: pre-computed stats + flagged issues in, a short narrative + recommendations
+"""Sprint pace readout: pre-computed stats + flagged issues in, a short narrative + recommendations
 out. The LLM never computes anything here — burndown math, "who's blocked," "what's stale," "what's
 unestimated" are all deterministic and done by the caller (the frontend, which already has the sprint's
 real ticket data) before this module ever sees the request. Same "code computes, LLM explains/decides
@@ -35,7 +35,7 @@ class SprintStats(BaseModel):
     unestimated_issues: List[FlaggedIssue] = Field(default_factory=list)
 
 
-class SprintHealthInsight(BaseModel):
+class SprintPaceInsight(BaseModel):
     summary: str = Field(
         ..., min_length=1,
         description="2-4 plain-language sentences: the overall assessment and its 1-2 biggest drivers "

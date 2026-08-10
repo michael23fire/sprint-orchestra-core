@@ -31,7 +31,7 @@
 | ⑦ Knowledge index | **與 vectorization 管線合併** → **Vectorization Service**（`vectorization-service`，已建置）。FTS 索引不在此，留在 Core；vectorization 另有自己的 chunk-granularity lexical index 用於 hybrid fusion，兩者用途不同（見 §3 附註）。 |
 | ⑧ Vector retrieval | Raw hybrid retrieval/rerank 由索引擁有者 **Vectorization Service** 提供；AI Service 透過 `/search` 組合 tool loop 並決定是否改寫 query 再檢索 |
 | ⑨ Agent orchestration | **併入 AI Service**（已建置：Claude tool use 驅動的 corrective-retrieval loop，見 §5） |
-| ⑩ Sprint intelligence | **併入 AI Service**（已實作 `POST /sprint-health` 與 durable sprint-recovery workflow） |
+| ⑩ Sprint intelligence | **併入 AI Service**（已實作 `POST /sprint-pace` 與 durable sprint-recovery workflow） |
 | ⑪ AI observability | **併入 AI Service**（對內模組／dashboard；對外仍走共用 OTel） |
 | ⑫ Platform observability | **不獨立成業務服務** → **全服務統一埋點 + 共用Observability 後端** |
 
@@ -144,7 +144,7 @@ sequenceDiagram
 |------|------|------|
 | **Retrieval** | Hybrid search、rerank、top-k、citation 準備 | Hybrid search 已實作（呼叫 vectorization-service `/search`）；**rerank 已實作**，但落在 vectorization-service 那側（索引擁有者一併提供 cross-encoder 二階段重排，`VEC_RERANK_ENABLED`）——ai-service 收到的已是（可選）重排過的結果，這裡不重複做 |
 | **Agents** | Planner、tool 呼叫、多步推理；未來 MCP | 已實作：**Corrective RAG loop**（`app/agent/crag_loop.py`）與七個內部 tools；MCP server/client 尚未實作，授權 contract 先列為後續項目 |
-| **Domain intelligence** | Sprint／board 風險分析與修復流程 | 已實作：`POST /sprint-health`；LangGraph sprint recovery 支援 clarification、human approval、idempotent execute、retry、Kafka re-evaluation、history 與 time travel |
+| **Domain intelligence** | Sprint／board 風險分析與修復流程 | 已實作：`POST /sprint-pace`；LangGraph sprint recovery 支援 clarification、human approval、idempotent execute、retry、Kafka re-evaluation、history 與 time travel |
 | **AI Ops** | Token／latency／retrieval quality 指標；對平台 OTel 匯出 | **Token/cost 已實作**（每次 `/ask` 回傳 `estimated_cost_usd`，`GET /stats` 累計）；**Latency 已實作**（`GET /metrics`，Prometheus，見 §6）；跨服務 OTel 匯出仍預留。另有一套可重跑的 **agentic eval harness**（`ai-service/eval/`，LLM-as-judge 評分 groundedness / abstention / retrieval 正確性）取代手動驗證 |
 | **Cache** | 查詢結果快取，降低重複問題的延遲與成本 | 已實作：exact-match + 語意（embedding cosine similarity）兩層快取（`app/cache/semantic_cache.py`），對 `space_ids` 嚴格隔離，TTL-only 失效（見 ai-service README「Semantic query cache」） |
 
@@ -184,7 +184,7 @@ sequenceDiagram
 | Vectorization Service | **`vectorization-service`**（FastAPI，已建置）：Kafka → chunk → embed → pgvector；`POST /search`（vector ∪ lexical，RRF，選用 cross-encoder rerank）；`POST /embed`；`GET /metrics`；contextual retrieval（選用）；自帶 `vecdb`（compose，:5433） |
 | AI Service | **`ai-service`**（FastAPI，已建置）：Corrective RAG、七個 space-scoped tools、Redis Stack 語意快取、streaming、drafting/planning、sprint health、durable epic rollout 與 sprint recovery、token/cost、`GET /metrics` |
 | 併發驗證 | **`loadtest/`**（Locust）：對兩服務跑真實併發測試，`vectorization-service` 50 併發、0 失敗；過程中在 `ai-service` 找到並修復 2 個真實 bug，詳見 `loadtest/README.md` |
-| 雲端部署 | **`docs/AWS_DEPLOYMENT.md`**：單一 EC2 的 portfolio deployment；只公開 HTTPS gateway，內部服務 ports 不得直接曝露。尚未完成的 backend resource-level RBAC 使它不應被宣稱為 production-ready |
+| 雲端部署 | 單一 EC2 的 portfolio deployment 規劃；只公開 HTTPS gateway，內部服務 ports 不得直接曝露。尚未完成的 backend resource-level RBAC 使它不應被宣稱為 production-ready |
 | 統一 OTel（跨服務 tracing） | **待導入**；兩服務已各自有 `/metrics` + request-id 轉發（見 §6），差跨服務 span |
 
 ---
