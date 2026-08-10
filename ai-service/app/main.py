@@ -24,6 +24,7 @@ from app.drafting.instructor_client import build_instructor_client
 from app.llm.factory import build_llm_client
 from app.logging_config import configure_logging
 from app.observability import ObservabilityMiddleware, metrics_response
+from app.planning.active_threads import ensure_plan_epic_active_threads_table
 from app.planning.checkpoint import build_checkpointer
 from app.planning.graph import build_planning_graph
 from app.planning.jira_commit_client import JiraCommitClient
@@ -111,6 +112,8 @@ async def lifespan(app: FastAPI):
             # Read at call time, not captured now — see build_rollout_graph's docstring.
             lambda: app.state.planning_graph,
         ).compile(checkpointer=checkpointer)
+        if checkpoint_db_url is not None:
+            await ensure_plan_epic_active_threads_table(checkpoint_db_url)
 
     sprint_recovery_graph = None
     jira_actions_client = None
@@ -154,6 +157,7 @@ async def lifespan(app: FastAPI):
     app.state.space_membership = space_membership
     app.state.planning_graph = planning_graph
     app.state.rollout_graph = rollout_graph
+    app.state.epic_rollout_checkpoint_db_url = checkpoint_db_url
     app.state.sprint_recovery_graph = sprint_recovery_graph
     app.state.sprint_recovery_kafka_trigger = sprint_recovery_kafka_trigger
     app.state.sprint_recovery_checkpoint_db_url = checkpoint_db_url

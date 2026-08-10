@@ -24,11 +24,11 @@ from tests.test_planning import FakeInstructorClient
 _EPIC = EpicDraft(title="Add dark mode", description="Support a dark theme app-wide.", goals=[])
 
 
-def _issue(temp_id, title=None, points=3):
+def _issue(temp_id, title=None, points=3, depends_on=None):
     return IssueDraft(
         temp_id=temp_id, title=title or f"Issue {temp_id}", description=f"Description {temp_id}",
         issue_type="task", labels=[], estimate_story_points=points, estimate_rationale="sized",
-        depends_on=[],
+        depends_on=depends_on or [],
     )
 
 
@@ -40,10 +40,12 @@ class FakeJiraCommitClient:
     """
 
     def __init__(self, fail_on_call: int = None, raise_type=JiraCommitError):
-        self.calls = []  # ('epic', title) | ('issue', temp_id, parent_id, user_id, username)
+        self.calls = []
         self._fail_on_call = fail_on_call
         self._raise_type = raise_type
         self._next_key = 100
+        self._next_sprint_id = 500
+        self._next_link_id = 900
 
     def _maybe_fail(self):
         if self._fail_on_call is not None and len(self.calls) == self._fail_on_call:
@@ -55,11 +57,23 @@ class FakeJiraCommitClient:
         self._next_key += 1
         return self._next_key, f"ATC-{self._next_key}"  # (issue_id, issue_key)
 
-    async def create_issue(self, space_id, issue, parent_id, user_id, username):
-        self.calls.append(("issue", issue.temp_id, parent_id, user_id, username))
+    async def create_sprint(self, space_id, name, user_id, username):
+        self.calls.append(("sprint", name, user_id, username))
+        self._maybe_fail()
+        self._next_sprint_id += 1
+        return self._next_sprint_id
+
+    async def create_issue(self, space_id, issue, parent_id, sprint_id, user_id, username):
+        self.calls.append(("issue", issue.temp_id, parent_id, sprint_id, user_id, username))
         self._maybe_fail()
         self._next_key += 1
-        return f"ATC-{self._next_key}"
+        return self._next_key, f"ATC-{self._next_key}"
+
+    async def create_issue_link(self, source_issue_id, target_issue_key, user_id, username):
+        self.calls.append(("link", source_issue_id, target_issue_key, user_id, username))
+        self._maybe_fail()
+        self._next_link_id += 1
+        return self._next_link_id
 
 
 def _graph(client, jira, space_membership=None, planning_graph=None):
@@ -136,6 +150,50 @@ async def test_edit_commits_the_caller_supplied_plan_not_the_generated_one():
     # The epic actually created is the *edited* one, not the originally generated title.
     assert jira.calls[0] == ("epic", "Add dark mode (edited)")
     assert jira.calls[1][1] == "1"
+
+
+async def test_edit_publishes_new_and_existing_sprints_and_dependency_links():
+    generated = EpicPlanDraft(epic=_EPIC, issues=[_issue("1"), _issue("2", depends_on=["1"])])
+    jira = FakeJiraCommitClient()
+    graph = _graph(FakeInstructorClient(generated), jira)
+    cfg = _cfg()
+
+    await graph.ainvoke(_state(), config=cfg)
+    result = await graph.ainvoke(
+        Command(resume={
+            "decision": "edit",
+            "epic": _EPIC.model_dump(),
+            "issues": [i.model_dump() for i in generated.issues],
+            "sprint_targets": [
+                {
+                    "sprint_index": 0,
+                    "issue_temp_ids": ["1"],
+                    "mode": "new",
+                    "sprint_id": None,
+                    "sprint_name": "Dark mode — Sprint 1",
+                },
+                {
+                    "sprint_index": 1,
+                    "issue_temp_ids": ["2"],
+                    "mode": "existing",
+                    "sprint_id": 777,
+                    "sprint_name": None,
+                },
+            ],
+        }),
+        config=cfg,
+    )
+
+    assert result["status"] == "committed"
+    assert result["created_sprints"] == {"0": 501, "1": 777}
+    assert result["committed_links"] == {"2>1": 901}
+    assert jira.calls == [
+        ("epic", "Add dark mode"),
+        ("sprint", "Dark mode — Sprint 1", "u1", "alice"),
+        ("issue", "1", 101, 501, "u1", "alice"),
+        ("issue", "2", 101, 777, "u1", "alice"),
+        ("link", 103, "ATC-102", "u1", "alice"),
+    ]
 
 
 async def test_rbac_recheck_failure_at_resume_rejects_without_committing():
@@ -269,6 +327,62 @@ async def test_retry_when_the_epic_itself_never_got_created():
     assert [c[0] for c in jira.calls] == ["epic", "epic", "issue"]  # first epic attempt, retry, then the issue
 
 
+async def test_retry_after_new_sprint_failure_does_not_recreate_epic():
+    plan = EpicPlanDraft(epic=_EPIC, issues=[_issue("1")])
+    jira = FakeJiraCommitClient(fail_on_call=2)  # epic succeeds, first sprint create fails
+    graph = _graph(FakeInstructorClient(plan), jira)
+    cfg = _cfg()
+    await graph.ainvoke(_state(), config=cfg)
+
+    failed = await graph.ainvoke(Command(resume={
+        "decision": "edit",
+        "epic": _EPIC.model_dump(),
+        "issues": [plan.issues[0].model_dump()],
+        "sprint_targets": [{
+            "sprint_index": 0,
+            "issue_temp_ids": ["1"],
+            "mode": "new",
+            "sprint_id": None,
+            "sprint_name": "Dark mode — Sprint 1",
+        }],
+    }), config=cfg)
+    assert failed["status"] == "failed"
+    assert failed["failed_step"] == "prepare_sprint"
+
+    result = await retry_rollout(graph, cfg["configurable"]["thread_id"])
+    assert result["status"] == "committed"
+    assert [call[0] for call in jira.calls] == ["epic", "sprint", "sprint", "issue"]
+
+
+async def test_retry_after_dependency_failure_only_retries_the_link():
+    plan = EpicPlanDraft(epic=_EPIC, issues=[_issue("1"), _issue("2", depends_on=["1"])])
+    jira = FakeJiraCommitClient(fail_on_call=4)  # epic + 2 issues succeed; dependency link fails
+    graph = _graph(FakeInstructorClient(plan), jira)
+    cfg = _cfg()
+    await graph.ainvoke(_state(), config=cfg)
+
+    failed = await graph.ainvoke(Command(resume={
+        "decision": "edit",
+        "epic": _EPIC.model_dump(),
+        "issues": [i.model_dump() for i in plan.issues],
+        "sprint_targets": [{
+            "sprint_index": 0,
+            "issue_temp_ids": ["1", "2"],
+            "mode": "existing",
+            "sprint_id": 777,
+            "sprint_name": None,
+        }],
+    }), config=cfg)
+    assert failed["status"] == "failed"
+    assert failed["failed_step"] == "link_one"
+    assert failed["committed"] == {"1": "ATC-102", "2": "ATC-103"}
+
+    result = await retry_rollout(graph, cfg["configurable"]["thread_id"])
+    assert result["status"] == "committed"
+    assert result["committed_links"] == {"2>1": 901}
+    assert [call[0] for call in jira.calls] == ["epic", "issue", "issue", "link", "link"]
+
+
 async def test_crash_mid_commit_resumes_without_duplicate_writes():
     """The actual fault-injection test: kill the process after the epic + 2 of 3 issues are durably
     committed, resume from a brand-new checkpointer connection + a brand-new graph object (nothing
@@ -337,7 +451,7 @@ async def test_crash_mid_commit_resumes_without_duplicate_writes():
         assert final["committed"] == {"1": "ATC-102", "2": "ATC-103", "3": "ATC-101"}
         # The critical assertion: process 2 only ever asked jira-backend to create issue "3" — no
         # epic-recreation call, no re-request of issues 1/2.
-        assert jira2.calls == [("issue", "3", final["epic_issue_id"], "u1", "alice")]
+        assert jira2.calls == [("issue", "3", final["epic_issue_id"], None, "u1", "alice")]
     finally:
         await stack2.aclose()
         async with await psycopg.AsyncConnection.connect(db_url, autocommit=True) as conn:

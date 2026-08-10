@@ -33,6 +33,21 @@ class SprintBucketState(TypedDict):
     total_points: int
 
 
+class SprintTargetState(TypedDict):
+    """The human's final destination for one non-empty planning bucket.
+
+    Kept separate from ``SprintBucketState`` because bin-packing answers *which issues belong
+    together*, while this answers *where that bucket is published*: an existing sprint or a new
+    sprint created as part of the durable workflow.
+    """
+
+    sprint_index: int
+    issue_temp_ids: List[str]
+    mode: Literal["existing", "new"]
+    sprint_id: Optional[int]
+    sprint_name: Optional[str]
+
+
 class RolloutState(TypedDict):
     # --- Set once, at the start node, never mutated afterward ---
     proposal: str
@@ -47,6 +62,7 @@ class RolloutState(TypedDict):
     epic: Optional[EpicDraft]
     issues: List[IssueDraft]
     sprint_buckets: List[SprintBucketState]
+    sprint_targets: List[SprintTargetState]
 
     # --- Written by the interrupt's resume payload ---
     decision: Optional[RolloutDecision]
@@ -56,15 +72,24 @@ class RolloutState(TypedDict):
     epic_issue_id: Optional[int]
     epic_issue_key: Optional[str]
 
+    # One entry is checkpointed after each sprint destination is resolved. For an existing sprint
+    # this records the selected id; for a new sprint it records the id returned by jira-backend.
+    created_sprints: Dict[str, int]  # sprint_index -> real sprint id
+
     # --- Written incrementally by commit_one_node; the idempotency ledger. Keyed by
     # IssueDraft.temp_id. Checked *before* creating each issue on every commit_one_node entry
     # (including a post-crash resume), so an issue already present here is never re-created. ---
     committed: Dict[str, str]  # temp_id -> real issue_key
+    committed_issue_ids: Dict[str, int]  # temp_id -> jira-backend issue id
+
+    # Dependency links are side effects too, so they get their own per-link checkpoint ledger.
+    committed_links: Dict[str, int]  # "source_temp_id>dependency_temp_id" -> issue-link id
 
     # --- Status/error bookkeeping ---
     status: RolloutStatus
     degraded: bool
     error: Optional[str]
+    failed_step: Optional[Literal["create_epic", "prepare_sprint", "commit_one", "link_one"]]
 
 
 def initial_rollout_state(
@@ -87,11 +112,16 @@ def initial_rollout_state(
         epic=None,
         issues=[],
         sprint_buckets=[],
+        sprint_targets=[],
         decision=None,
         epic_issue_id=None,
         epic_issue_key=None,
+        created_sprints={},
         committed={},
+        committed_issue_ids={},
+        committed_links={},
         status="pending_approval",
         degraded=False,
         error=None,
+        failed_step=None,
     )

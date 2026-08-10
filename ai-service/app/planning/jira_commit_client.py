@@ -1,5 +1,8 @@
-"""Writes an approved epic-rollout plan to jira-backend: one real epic-type issue, then one issue per
-node step, each `parentId`-linked to it.
+"""Publishes an approved AI epic plan to jira-backend.
+
+The durable graph calls this client once per side effect: create/reuse each selected sprint, create
+the real epic, create each child issue in its chosen sprint, then create each planned dependency
+link. Keeping the client operations small lets the graph checkpoint progress between operations.
 
 Same gateway-internal-token + X-User-Id/X-Username header pattern `app/auth/space_membership.py`
 already established for calling jira-backend from ai-service — see that module's docstring for why
@@ -17,8 +20,7 @@ replaced) client-side commit loop already used.
 """
 from __future__ import annotations
 
-import time
-from typing import List, Optional
+from typing import Optional
 
 import httpx
 
@@ -26,9 +28,11 @@ from app.planning.schemas import EpicDraft, IssueDraft
 
 
 class JiraCommitError(Exception):
-    """A create-issue call to jira-backend failed. Callers should leave the rollout's `committed`
-    ledger (and `epic_issue_id`) exactly as they were before the call — a failed create was never
-    persisted server-side, so there is nothing to record, and a resume will simply retry.
+    """A Jira publishing call failed or returned an unusable response.
+
+    The graph does not record the step as completed and exposes an explicit resume path. As with any
+    cross-service request, a transport failure after the remote commit is ambiguous; the UI therefore
+    describes checkpointed resume rather than claiming a distributed exactly-once transaction.
     """
 
 
@@ -68,24 +72,48 @@ class JiraCommitClient:
             raise JiraCommitError(f"jira-backend response for epic '{epic.title}' missing id/issueKey: {data}")
         return issue_id, issue_key
 
+    async def create_sprint(
+        self, space_id: int, name: str, user_id: str, username: str,
+    ) -> int:
+        try:
+            resp = await self._client.post(
+                f"/api/spaces/{space_id}/sprints",
+                json={"name": name},
+                headers=self._headers(user_id, username),
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise JiraCommitError(f"failed creating sprint '{name}': {exc}") from exc
+        sprint_id = resp.json().get("id")
+        if not sprint_id:
+            raise JiraCommitError(f"jira-backend response for sprint '{name}' missing id")
+        return int(sprint_id)
+
     async def create_issue(
         self,
         space_id: int,
         issue: IssueDraft,
         parent_id: int,
+        sprint_id: Optional[int],
         user_id: str,
         username: str,
-    ) -> str:
-        """Creates exactly one issue under `parent_id` (the epic), returns its real `issueKey`.
+    ) -> tuple[int, str]:
+        """Creates one issue under `parent_id`, returning its internal id and issue key.
+
+        The id is retained by the graph so dependency links can be created after all issues exist.
         Raises `JiraCommitError` on any failure — callers must not guess at partial success.
         """
+        description = issue.description.strip()
+        if issue.estimate_rationale:
+            description = f"{description}\n\nEstimate rationale: {issue.estimate_rationale}".strip()
         body = {
             "title": issue.title,
-            "description": issue.description,
+            "description": description,
             "issueType": issue.issue_type,
             "storyPoints": issue.estimate_story_points,
             "labels": issue.labels,
             "parentId": parent_id,
+            "sprintId": sprint_id,
         }
         try:
             resp = await self._client.post(
@@ -95,10 +123,35 @@ class JiraCommitClient:
         except httpx.HTTPError as exc:
             raise JiraCommitError(f"failed creating issue '{issue.title}': {exc}") from exc
         data = resp.json()
-        issue_key = data.get("issueKey")
-        if not issue_key:
-            raise JiraCommitError(f"jira-backend response for '{issue.title}' had no issueKey: {data}")
-        return issue_key
+        issue_id, issue_key = data.get("id"), data.get("issueKey")
+        if not issue_id or not issue_key:
+            raise JiraCommitError(f"jira-backend response for '{issue.title}' missing id/issueKey: {data}")
+        return int(issue_id), issue_key
+
+    async def create_issue_link(
+        self,
+        source_issue_id: int,
+        target_issue_key: str,
+        user_id: str,
+        username: str,
+    ) -> int:
+        try:
+            resp = await self._client.post(
+                f"/api/issues/{source_issue_id}/links",
+                json={"relation": "is blocked by", "targetIssueKey": target_issue_key},
+                headers=self._headers(user_id, username),
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise JiraCommitError(
+                f"failed linking issue id {source_issue_id} to '{target_issue_key}': {exc}"
+            ) from exc
+        link_id = resp.json().get("id")
+        if not link_id:
+            raise JiraCommitError(
+                f"jira-backend link response for issue id {source_issue_id} missing id"
+            )
+        return int(link_id)
 
     async def aclose(self) -> None:
         await self._client.aclose()

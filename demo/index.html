@@ -74,7 +74,7 @@
     </div>
     <div style="max-width:140px">
       <label>space_ids</label>
-      <input id="spaceIds" value="5000014" />
+      <input id="spaceIds" value="5000018" />
     </div>
   </div>
   <button class="secondary" onclick="checkHealth()">Check both /healthz</button>
@@ -171,22 +171,21 @@
 </fieldset>
 
 <fieldset>
-  <legend>4. Epic rollout — durable, human-approved commit to Jira (<code>POST /plan-epic/rollout</code>)</legend>
+  <legend>4. Plan Epic with AI — durable review and publish (<code>POST /plan-epic/rollout</code>)</legend>
   <p class="stats-line" style="margin-top:0">
-    Different from task drafting above: this pauses for a real approval step (a LangGraph
-    <code>interrupt()</code>, checkpointed in Postgres — it survives an ai-service restart while
-    paused) and, once approved, actually creates the issues in jira-backend, exactly once each even if
-    the process crashes mid-commit. Needs a real user id/username (unlike the other panels) because
-    jira-backend attributes each created issue to a real reporter.
+    Generates a complete epic plan, pauses for human review in a Postgres-checkpointed LangGraph
+    workflow, then publishes the approved epic, sprint buckets, child issues, and dependencies from
+    the server. Needs a real user id/username because jira-backend attributes created work to a real
+    reporter.
   </p>
   <div class="row">
     <div style="max-width:140px"><label>User id</label><input id="rolloutUserId" value="5000154" /></div>
     <div style="max-width:200px"><label>Username</label><input id="rolloutUsername" value="atlascart.maya" /></div>
-    <div style="max-width:140px"><label>space_id</label><input id="rolloutSpaceId" value="5000014" /></div>
+    <div style="max-width:140px"><label>space_id</label><input id="rolloutSpaceId" value="5000018" /></div>
   </div>
   <label>Proposal</label>
   <textarea id="rolloutProposal" placeholder="e.g. Add a dark mode toggle to account settings, persisted per-user."></textarea>
-  <button onclick="startRollout(this)">Start rollout (generate plan, pause for approval)</button>
+  <button onclick="startRollout(this)">Generate plan for review</button>
 
   <div class="presets">
     <span class="cat">Try one of these</span>
@@ -197,11 +196,10 @@
   <div id="rolloutOut"></div>
 
   <p class="stats-line" style="margin-top:16px">
-    <b>To see the crash/resume guarantee for real</b> (not simulated in this page): start a rollout,
+    <b>To see durable resume for real</b> (not simulated in this page): generate a plan,
     click Approve, and — in a terminal, while it's mid-commit — kill and immediately restart the
-    ai-service process. Click "Refresh status" here once it's back up: already-created issues are not
-    duplicated, and the remaining ones finish committing on the next status check or decision call,
-    because the workflow's progress lived in Postgres the whole time, not in ai-service's memory.
+    ai-service process. Click "Refresh status" and then "Resume publishing" once it's back up; the
+    workflow continues from its last recorded checkpoint instead of relying on browser memory.
   </p>
 </fieldset>
 
@@ -490,6 +488,9 @@ function renderRolloutPlan(d) {
     ? `<button onclick="decideRollout('${d.threadId}', 'approve')">Approve</button>
        <button onclick="decideRollout('${d.threadId}', 'edit')" class="secondary">Save title edits &amp; approve</button>
        <button onclick="decideRollout('${d.threadId}', 'reject')" class="secondary">Reject</button>`
+    : (d.status === 'failed' || d.status === 'committing')
+      ? `<button onclick="resumeRollout('${d.threadId}')">Resume publishing</button>
+         <button class="secondary" onclick="refreshRollout('${d.threadId}')">Refresh status</button>`
     : `<button class="secondary" onclick="refreshRollout('${d.threadId}')">Refresh status</button>`;
 
   const err = d.error ? `<p class="stats-line" style="color:#d94f4f">${escapeHtml(d.error)}</p>` : '';
@@ -540,7 +541,7 @@ async function startRollout(btn) {
 async function decideRollout(threadId, decision) {
   const out = $('rolloutOut');
   const body = { decision };
-  if (decision === 'edit') {
+  if (decision !== 'reject') {
     const titleInputs = out.querySelectorAll('[data-edit-title]');
     // Re-fetch the current plan first so we edit titles onto the real current issue list rather than
     // trusting stale DOM state for everything else (description/labels/estimate/depends_on).
@@ -548,8 +549,18 @@ async function decideRollout(threadId, decision) {
     const current = await statusResp.json();
     const titleByTempId = {};
     titleInputs.forEach(inp => { titleByTempId[inp.dataset.editTitle] = inp.value; });
+    body.decision = 'edit';
     body.epic = current.plan.epic;
     body.issues = current.plan.issues.map(i => ({ ...i, title: titleByTempId[i.tempId] ?? i.title }));
+    body.sprintTargets = current.plan.sprintPlan
+      .filter(bucket => bucket.issueTempIds.length > 0)
+      .map(bucket => ({
+        sprintIndex: bucket.sprintIndex,
+        issueTempIds: bucket.issueTempIds,
+        mode: 'new',
+        sprintId: null,
+        sprintName: `${current.plan.epic.title} — Sprint ${bucket.sprintIndex + 1}`,
+      }));
   }
   out.innerHTML = `<div class="result loading-card"><span class="spinner"></span> ${decision === 'reject' ? 'Rejecting' : 'Committing to Jira'}…</div>`;
   try {
@@ -581,6 +592,24 @@ async function refreshRollout(threadId) {
     out.innerHTML = renderRolloutPlan(d);
   } catch (e) {
     out.innerHTML = `<div class="result"><span class="badge warn">request failed</span> ${escapeHtml(String(e))} — if you just restarted ai-service, give it a couple seconds and try again.</div>`;
+  }
+}
+
+async function resumeRollout(threadId) {
+  const out = $('rolloutOut');
+  out.innerHTML = '<div class="result loading-card"><span class="spinner"></span> Resuming from the saved checkpoint…</div>';
+  try {
+    const resp = await fetch(aiBase() + `/plan-epic/rollout/${threadId}/retry`, {
+      method: 'POST', headers: rolloutHeaders(),
+    });
+    if (!resp.ok) {
+      const b = await resp.text();
+      out.innerHTML = `<div class="result"><span class="badge warn">HTTP ${resp.status}</span> ${formatErrorBody(b)}</div>`;
+      return;
+    }
+    out.innerHTML = renderRolloutPlan(await resp.json());
+  } catch (e) {
+    out.innerHTML = `<div class="result"><span class="badge warn">request failed</span> ${escapeHtml(String(e))}</div>`;
   }
 }
 

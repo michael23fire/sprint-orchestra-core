@@ -23,11 +23,15 @@ from app.planning.graph import plan_epic_multiagent
 from app.planning.rollout_graph import ON_STAGE_VAR as ROLLOUT_ON_STAGE_VAR
 from app.planning.rollout_graph import retry_rollout
 from app.planning.rollout_schemas import initial_rollout_state
+from app.planning.active_threads import (
+    find_plan_epic_active_thread_id,
+    register_plan_epic_active_thread,
+)
 from app.planning.schemas import EpicDraft, IssueDraft
 from app.planning.service import allocate_sprints, plan_epic, refine_plan, validate_and_order
 from app.search.service import DEFAULT_MIN_SCORE, RERANKED_MIN_SCORE, dedupe_by_issue
-from app.sprint_health.schemas import FlaggedIssue, SprintStats
-from app.sprint_health.service import summarize_sprint_health
+from app.sprint_pace.schemas import FlaggedIssue, SprintStats
+from app.sprint_pace.service import summarize_sprint_pace
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -591,13 +595,10 @@ async def refine_plan_endpoint(req: RefinePlanRequest, request: Request) -> Plan
     )
 
 
-# --- Epic rollout: durable, human-approved commit-to-Jira workflow (app/planning/rollout_graph.py) ---
-# Distinct from /plan-epic above: that endpoint never persists anything (see its own docstring) and
-# returns in one blocking call. This one can pause for an arbitrary real amount of time waiting on a
-# human decision (Postgres-checkpointed, survives an ai-service restart while paused) and, once
-# approved, actually writes the issues to jira-backend — the one place in the planning feature with an
-# irreversible side effect, which is why it is the one place this codebase uses LangGraph's durable-
-# execution primitives rather than a plain function call.
+# --- Durable lifecycle for Plan Epic (app/planning/rollout_graph.py) ---
+# Kept under the existing /rollout path for API compatibility, but this is no longer a separate
+# product feature: the Plan Epic UI starts this workflow, edits its preview, then submits the final
+# epic/issues/sprint destinations for durable server-side publishing.
 
 
 class RolloutIssueOut(_CamelModel):
@@ -611,10 +612,19 @@ class RolloutIssueOut(_CamelModel):
     depends_on: List[str]
 
 
+class RolloutSprintTargetOut(_CamelModel):
+    sprint_index: int
+    issue_temp_ids: List[str]
+    mode: Literal["existing", "new"]
+    sprint_id: Optional[int]
+    sprint_name: Optional[str]
+
+
 class RolloutPlanOut(_CamelModel):
     epic: Optional[EpicDraftOut]
     issues: List[RolloutIssueOut]
     sprint_plan: List[SprintBucketOut]
+    sprint_targets: List[RolloutSprintTargetOut]
 
 
 class RolloutStatusResponse(_CamelModel):
@@ -623,6 +633,7 @@ class RolloutStatusResponse(_CamelModel):
     plan: Optional[RolloutPlanOut]
     epic_issue_key: Optional[str]
     committed_issue_keys: Dict[str, str]
+    degraded: bool
     error: Optional[str]
 
 
@@ -633,6 +644,7 @@ def _rollout_status_response(thread_id: str, values: dict) -> RolloutStatusRespo
         epic=EpicDraftOut(**epic.model_dump()) if epic else None,
         issues=[RolloutIssueOut(**i.model_dump()) for i in issues],
         sprint_plan=[SprintBucketOut(**b) for b in values.get("sprint_buckets") or []],
+        sprint_targets=[RolloutSprintTargetOut(**t) for t in values.get("sprint_targets") or []],
     )
     return RolloutStatusResponse(
         thread_id=thread_id,
@@ -640,6 +652,7 @@ def _rollout_status_response(thread_id: str, values: dict) -> RolloutStatusRespo
         plan=plan,
         epic_issue_key=values.get("epic_issue_key"),
         committed_issue_keys=values.get("committed") or {},
+        degraded=bool(values.get("degraded", False)),
         error=values.get("error"),
     )
 
@@ -671,6 +684,21 @@ def _caller_identity(request: Request) -> tuple[str, str]:
     return user_id, username
 
 
+async def _register_plan_epic_thread_if_configured(
+    request: Request, space_id: int, user_id: str, thread_id: str,
+) -> None:
+    """Best-effort discovery index; failing it must not prevent the workflow itself from starting."""
+    db_url = getattr(request.app.state, "epic_rollout_checkpoint_db_url", None)
+    if not db_url:
+        return
+    try:
+        await register_plan_epic_active_thread(db_url, space_id, user_id, thread_id)
+    except Exception:  # noqa: BLE001 - the checkpointed workflow remains usable by its direct id
+        logger.exception(
+            "failed to register active Plan Epic thread (space=%s, user=%s)", space_id, user_id,
+        )
+
+
 @router.post("/plan-epic/rollout", response_model=RolloutStatusResponse)
 async def start_rollout_endpoint(req: PlanRolloutRequest, request: Request) -> RolloutStatusResponse:
     """Starts a new durable rollout workflow: generates a plan, then pauses for approval. Always
@@ -681,6 +709,7 @@ async def start_rollout_endpoint(req: PlanRolloutRequest, request: Request) -> R
     graph = _rollout_graph(request)
     user_id, username = _caller_identity(request)
     thread_id = str(uuid.uuid4())
+    await _register_plan_epic_thread_if_configured(request, req.space_id, user_id, thread_id)
     initial = initial_rollout_state(
         req.proposal, req.existing_labels, req.sprint_capacity_points, req.target_sprint_count,
         req.space_id, user_id, username,
@@ -703,6 +732,7 @@ async def start_rollout_stream_endpoint(req: PlanRolloutRequest, request: Reques
     graph = _rollout_graph(request)
     user_id, username = _caller_identity(request)
     thread_id = str(uuid.uuid4())
+    await _register_plan_epic_thread_if_configured(request, req.space_id, user_id, thread_id)
     initial = initial_rollout_state(
         req.proposal, req.existing_labels, req.sprint_capacity_points, req.target_sprint_count,
         req.space_id, user_id, username,
@@ -736,6 +766,38 @@ async def start_rollout_stream_endpoint(req: PlanRolloutRequest, request: Reques
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+_ROLLOUT_TERMINAL_STATUSES = {"committed", "rejected"}
+
+
+@router.get("/plan-epic/rollout/active", response_model=Optional[RolloutStatusResponse])
+async def find_active_rollout_endpoint(space_id: int, request: Request) -> Optional[RolloutStatusResponse]:
+    """Return this caller's latest unfinished Plan Epic workflow in the selected space.
+
+    This is the browser-reload bridge: the durable checkpoint survives independently, while this
+    lookup restores the thread id that browser memory lost.  Finished/rejected workflows are not
+    reopened, and another user's workflow is indistinguishable from no active workflow.
+    """
+    await _authorize_space_ids(request, [space_id])
+    user_id, _ = _caller_identity(request)
+    db_url = getattr(request.app.state, "epic_rollout_checkpoint_db_url", None)
+    if not db_url:
+        return None
+    thread_id = await find_plan_epic_active_thread_id(db_url, space_id, user_id)
+    if not thread_id:
+        return None
+    graph = _rollout_graph(request)
+    snap = await graph.aget_state({"configurable": {"thread_id": thread_id}})
+    if not snap.values or snap.values.get("status") in _ROLLOUT_TERMINAL_STATUSES:
+        return None
+    try:
+        await _authorize_workflow_state(request, snap.values)
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            return None
+        raise
+    return _rollout_status_response(thread_id, snap.values)
+
+
 @router.get("/plan-epic/rollout/{thread_id}", response_model=RolloutStatusResponse)
 async def get_rollout_status_endpoint(thread_id: str, request: Request) -> RolloutStatusResponse:
     graph = _rollout_graph(request)
@@ -747,10 +809,19 @@ async def get_rollout_status_endpoint(thread_id: str, request: Request) -> Rollo
     return _rollout_status_response(thread_id, snap.values)
 
 
+class RolloutSprintTargetIn(_CamelModel):
+    sprint_index: int = Field(ge=0)
+    issue_temp_ids: List[str] = Field(min_length=1)
+    mode: Literal["existing", "new"]
+    sprint_id: Optional[int] = Field(None, ge=1)
+    sprint_name: Optional[str] = None
+
+
 class RolloutDecisionRequest(_CamelModel):
     decision: Literal["approve", "edit", "reject"]
     epic: Optional[EpicDraftIn] = None
     issues: Optional[List[IssueDraftIn]] = None
+    sprint_targets: Optional[List[RolloutSprintTargetIn]] = None
 
 
 @router.post("/plan-epic/rollout/{thread_id}/decision", response_model=RolloutStatusResponse)
@@ -780,8 +851,14 @@ async def submit_rollout_decision_endpoint(
             raise HTTPException(status_code=422, detail="decision=edit requires epic and issues")
         resume_payload["epic"] = req.epic.model_dump()
         resume_payload["issues"] = [i.model_dump() for i in req.issues]
+        if req.sprint_targets is not None:
+            resume_payload["sprint_targets"] = [t.model_dump() for t in req.sprint_targets]
 
-    await graph.ainvoke(Command(resume=resume_payload), config=config)
+    try:
+        await graph.ainvoke(Command(resume=resume_payload), config=config)
+    except ValueError as exc:
+        # Final-plan validation happens in review_node before the first irreversible Jira write.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     final = await graph.aget_state(config)
     return _rollout_status_response(thread_id, final.values)
 
@@ -819,7 +896,7 @@ class FlaggedIssueIn(_CamelModel):
     detail: Optional[str] = None
 
 
-class SprintHealthRequest(_CamelModel):
+class SprintPaceRequest(_CamelModel):
     sprint_name: str = Field(min_length=1)
     risk_level: Literal["on_track", "at_risk", "behind"] = Field(
         description="Computed by the caller from real burndown math (points/days) — ai-service never guesses this."
@@ -834,17 +911,20 @@ class SprintHealthRequest(_CamelModel):
     unestimated_issues: List[FlaggedIssueIn] = Field(default_factory=list)
 
 
-class SprintHealthResponse(_CamelModel):
+class SprintPaceResponse(_CamelModel):
     summary: str
     recommendations: List[str]
     degraded: bool
     latency_seconds: float
+    input_tokens: int
+    output_tokens: int
+    estimated_cost_usd: float
 
 
-@router.post("/sprint-health", response_model=SprintHealthResponse)
-async def sprint_health_endpoint(req: SprintHealthRequest, request: Request) -> SprintHealthResponse:
+@router.post("/sprint-pace", response_model=SprintPaceResponse)
+async def sprint_pace_endpoint(req: SprintPaceRequest, request: Request) -> SprintPaceResponse:
     """Turns pre-computed sprint stats + flagged issues into a short narrative + recommendations.
-    Nothing here is calculated by the model — see app/sprint_health/schemas.py's module docstring —
+    Nothing here is calculated by the model — see app/sprint_pace/schemas.py's module docstring —
     and a model failure degrades to a mechanically-assembled summary, never a 500.
     """
     client = request.app.state.instructor_client
@@ -861,12 +941,15 @@ async def sprint_health_endpoint(req: SprintHealthRequest, request: Request) -> 
         stale_issues=[FlaggedIssue(**i.model_dump()) for i in req.stale_issues],
         unestimated_issues=[FlaggedIssue(**i.model_dump()) for i in req.unestimated_issues],
     )
-    result = await summarize_sprint_health(client, model, stats)
-    return SprintHealthResponse(
+    result = await summarize_sprint_pace(client, model, stats)
+    return SprintPaceResponse(
         summary=result.insight.summary,
         recommendations=result.insight.recommendations,
         degraded=result.degraded,
         latency_seconds=round(result.latency_seconds, 3),
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        estimated_cost_usd=result.estimated_cost_usd,
     )
 
 

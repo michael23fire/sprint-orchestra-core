@@ -145,10 +145,48 @@ for the exact commands and real output.
 | POST | `/ask/stream` | SSE progress plus the same final Ask result |
 | POST | `/search` | Space-authorized semantic issue dedup/search helper |
 | POST | `/draft-task` | `{description, existing_labels?}` → `{draft: {title, issue_type, labels, estimate_story_points, dependencies}, degraded, latency_seconds}` — see "AI-assisted task creation" below |
-| POST | `/plan-epic`, `/plan-epic/refine` | Generate or refine a structured epic plan; optional planner↔critic LangGraph path |
-| POST/GET | `/plan-epic/rollout/**` | Start/stream/read/approve/reject/retry a durable human-approved rollout |
-| POST | `/sprint-health` | Deterministic sprint risk signals plus grounded AI analysis |
+| POST | `/plan-epic`, `/plan-epic/refine` | Compatibility endpoints for stateless plan generation/refinement; optional planner↔critic path |
+| POST/GET | `/plan-epic/rollout/**` | Integrated Plan Epic lifecycle: generate, review/edit, publish sprints/issues/dependencies, resume/retry |
+| POST | `/sprint-pace` | Deterministic sprint pace signals plus grounded AI analysis |
 | POST/GET | `/sprint-recovery/**` | Durable recovery start, clarification, decision, retry, reevaluation, history, and time travel |
+
+## Integrated Plan Epic full-stack E2E
+
+The live E2E runner exercises the same Gateway and SSE boundary as the browser, including a real LLM
+call and real Jira writes. Start the whole dev stack first, then run it from the repository root:
+
+```bash
+scripts/dev_up.sh
+cd ai-service
+.venv/bin/python -m eval.plan_epic_fullstack_e2e
+```
+
+It performs these steps in order:
+
+1. Checks Gateway, frontend, jira-backend (through Gateway), ai-service, vectorization-service, LM
+   Studio, core PostgreSQL, Redis, and Kafka.
+2. Logs in through Gateway and chooses an authorized space (preferring the demo space when present).
+3. Creates one existing-sprint fixture with a unique `PLAN-E2E-...` marker.
+4. Starts Plan Epic through the UI's SSE route, requires a progress event and a non-degraded AI plan,
+   and verifies the durable workflow paused for approval without writing Jira issues.
+5. Calls AI refine and verifies it remains non-degraded and side-effect free.
+6. Submits a deterministic human edit, targeting one existing sprint and one new sprint.
+7. Reads Jira back through Gateway and verifies the Epic, four children, parent/reporter/sprint fields,
+   estimate rationale, and dependency links.
+8. Reads the durable workflow status and verifies the committed ledger.
+9. In a `finally` block, deletes the test Epic (cascading to its children/links), both exact test
+   sprints, and only this run's LangGraph checkpoint thread. It waits for the Kafka delete events and
+   verifies that this run's replicated pgvector/search rows are also gone, then asserts zero residue.
+
+Cleanup is the default and also runs after a failed assertion or Ctrl-C. The runner deletes only IDs
+returned by its own run or exact unique-marker names; it does not call Sprint Recovery endpoints or
+delete Sprint Recovery data. `--keep-data` is available only for deliberate debugging and should not
+be used in normal verification. To select a space or credentials explicitly:
+
+```bash
+.venv/bin/python -m eval.plan_epic_fullstack_e2e --space-id 5000018
+E2E_USERNAME=alice E2E_PASSWORD=123 .venv/bin/python -m eval.plan_epic_fullstack_e2e
+```
 
 ## Cost tracking
 
@@ -158,9 +196,7 @@ including every corrective-retrieval round and the forced-final-answer call — 
 into `estimated_cost_usd` on every `/ask` response; `GET /stats` accumulates it across the process's
 lifetime. Local/OpenAI-compatible models (LM Studio, etc.) price at **$0** — there's no metered API
 bill for them, though token counts are still tracked for capacity-planning visibility. This answers "how
-much did this demo actually cost me" with a number, not a guess — see
-[`docs/AWS_DEPLOYMENT.md`](../docs/AWS_DEPLOYMENT.md) for realistic total cost estimates of running
-this project's cloud path.
+much did this demo actually cost me" with a number, not a guess.
 
 ## Semantic query cache (on by default), backed by Redis Stack
 
@@ -427,13 +463,12 @@ direct reproduction proving the failure is upstream: [`../loadtest/README.md`](.
 ## Deployment
 
 For running this outside your laptop, expose only the authenticated gateway (preferably behind HTTPS),
-never this service's direct port. See [`../docs/AWS_DEPLOYMENT.md`](../docs/AWS_DEPLOYMENT.md).
+never this service's direct port.
 
 ## Known simplifications (portfolio scope)
 
 Kept up to date as the system evolves — several items below were open gaps earlier in this project
-and are now closed; see docs/RAG_ACCURACY_CASE_STUDIES.md for the full story behind each fix, not
-just the current-state summary here.
+and are now closed.
 
 **Still open:**
 - **CORS is wide open (`allow_origins=["*"]`)** — a demo-only choice, made explicit rather than
@@ -484,8 +519,7 @@ just the current-state summary here.
 - ~~CRAG grading is the agent's own reasoning, not a trained relevance classifier~~ — still true, but
   reclassified from "gap" to "deliberate design" once the corrective-retrieval-fallback pattern
   (`get_issue_comments`/`get_issue_details`/`get_issue_attachments`) made the actual failure mode this
-  gap implied (bad self-assessment of retrieval quality) a non-issue in practice — see
-  docs/RAG_ACCURACY_CASE_STUDIES.md's Case Study 25.
+  gap implied (bad self-assessment of retrieval quality) a non-issue in practice.
 - ~~No prompt caching~~ — **Fixed for Anthropic.** `AnthropicClient` places cache breakpoints on the
   system/tools prefix and conversation tail, tracks cache-read/write tokens separately, and prices
   them with separate multipliers. The request time embedded in the system prompt is bucketed to five

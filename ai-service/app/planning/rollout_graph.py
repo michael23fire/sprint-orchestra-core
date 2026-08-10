@@ -1,23 +1,18 @@
-"""Epic rollout: proposal -> plan -> durable human-approval pause -> idempotent commit to Jira.
+"""Durable Plan Epic: generate -> edit/review -> publish the complete plan to Jira.
 
 The `app/planning/graph.py` planner<->critic graph answers "how is a plan *generated*". This graph
 answers a different question this codebase has not needed to answer before: "what happens after a
-human is asked to approve something, when that approval might not arrive for hours, and the action on
-approval writes real data exactly once even if the process restarts mid-write." That combination —
-durable pause + resume + idempotent side effect — is the actual LangGraph capability this codebase was
-missing (see `app/planning/graph.py`'s own docstring on why its loop doesn't need a framework at all).
+human is asked to approve something, when that approval might not arrive for hours, and publishing
+must resume after a process restart." Durable pause + per-step checkpointed side effects are the
+LangGraph capabilities this codebase was missing (see `app/planning/graph.py`'s own docstring on why
+its generation loop doesn't need a framework at all).
 This graph wraps the *existing* plan-generation call (single-call or multi-agent, whichever
 `Settings.epic_planning_multiagent_enabled` selects) rather than re-implementing it.
 
-**Commit is one issue per graph step, not a Python loop inside one node.** `AsyncPostgresSaver`
-checkpoints state *between* node executions, not in the middle of one — a node that looped over all N
-issues internally and crashed after writing issue 3 of 5 would lose the record that issues 1-2 were
-already created (their creation happened, but the state update recording it was never checkpointed),
-and a resume would recreate them. Making `commit_one_node` handle exactly one issue and loop back via
-a conditional edge means every single created issue is durably recorded before the next one is
-attempted — this is *why* the fault-injection test in `tests/test_rollout_graph.py` kills the process
-mid-commit rather than only at the interrupt: pausing at a human-wait point is the easy case, surviving
-a crash mid-write is the one that actually needs the per-step checkpoint granularity.
+**Every publish side effect is one graph step.** `AsyncPostgresSaver` checkpoints state between node
+executions, so new sprint creation, child-issue creation, and dependency-link creation each advance
+one durable ledger entry at a time. A restart resumes from the last recorded step instead of forcing
+the browser to reconstruct a partially published plan.
 
 **RBAC is re-checked at resume, not trusted from when the workflow started.** A pending approval can
 sit for hours; the approver's space membership is revalidated against jira-backend at the moment the
@@ -42,13 +37,10 @@ then invokes — the same
 idempotency ledger (`committed`, `epic_issue_id`) means whatever already succeeded is never re-sent to
 jira-backend.
 
-**Scope, stated plainly.** `commit_one_node` creates one real epic-type issue plus its child issues,
-`parentId`-linked — matching `sprint-orchestra-studio`'s existing `PlanEpicModal.tsx` client-side
-commit loop this graph is meant to replace. It does **not** yet create sprints or bucket issues into
-them (`sprint_buckets` is computed and returned in every preview/status response, same as `/plan-epic`
-always did, but nothing consumes it here) and does **not** yet create the `dependsOn` issue-link rows
-the existing frontend also creates. Both are real, known gaps versus full parity with the flow being
-replaced, not oversights — see `docs/RAG_ACCURACY_CASE_STUDIES.md` Case Study 31's follow-up note.
+The workflow now replaces the old browser-side publish loop completely: the final human-edited plan,
+new-or-existing sprint targets, child issue placement, estimate rationale, and `depends_on` links are
+all committed server-side. The standalone rollout UI is therefore unnecessary; this graph is the
+publish lifecycle of Plan Epic itself.
 """
 from __future__ import annotations
 
@@ -61,7 +53,7 @@ from langgraph.types import interrupt
 
 from app.auth.space_membership import SpaceMembershipChecker, SpaceMembershipError
 from app.planning.jira_commit_client import JiraCommitClient, JiraCommitError
-from app.planning.rollout_schemas import RolloutState, SprintBucketState
+from app.planning.rollout_schemas import RolloutState, SprintBucketState, SprintTargetState
 from app.planning.schemas import EpicDraft, IssueDraft
 from app.planning.service import allocate_sprints, plan_epic, refine_plan, validate_and_order
 
@@ -143,16 +135,88 @@ async def review_node(state: RolloutState, space_membership: SpaceMembershipChec
         edited_epic = EpicDraft.model_validate(decision_payload["epic"])
         edited_issues = [IssueDraft.model_validate(i) for i in decision_payload["issues"]]
         ordered = validate_and_order(edited_issues)
-        buckets = allocate_sprints(ordered, state["sprint_capacity_points"], state["target_sprint_count"])
+        supplied_targets = decision_payload.get("sprint_targets")
+        if supplied_targets is None:
+            buckets = allocate_sprints(ordered, state["sprint_capacity_points"], state["target_sprint_count"])
+            sprint_buckets = _buckets_to_state(buckets)
+            sprint_targets: List[SprintTargetState] = []
+        else:
+            sprint_targets = _validate_sprint_targets(supplied_targets, ordered)
+            sprint_buckets = [
+                SprintBucketState(
+                    sprint_index=t["sprint_index"],
+                    issue_temp_ids=t["issue_temp_ids"],
+                    total_points=sum(
+                        i.estimate_story_points or 0
+                        for i in ordered
+                        if i.temp_id in t["issue_temp_ids"]
+                    ),
+                )
+                for t in sprint_targets
+            ]
         return {
             "decision": "edit",
             "epic": edited_epic,
             "issues": ordered,
-            "sprint_buckets": _buckets_to_state(buckets),
+            "sprint_buckets": sprint_buckets,
+            "sprint_targets": sprint_targets,
             "status": "committing",
+            "error": None,
+            "failed_step": None,
         }
 
-    return {"decision": "approve", "status": "committing"}
+    return {"decision": "approve", "status": "committing", "error": None, "failed_step": None}
+
+
+def _validate_sprint_targets(raw_targets: list, issues: List[IssueDraft]) -> List[SprintTargetState]:
+    """Validate the browser's final bucket destinations before any Jira write occurs."""
+    known_ids = {i.temp_id for i in issues}
+    seen_issue_ids: set[str] = set()
+    seen_indexes: set[int] = set()
+    targets: List[SprintTargetState] = []
+
+    for raw in raw_targets:
+        sprint_index = int(raw["sprint_index"])
+        if sprint_index in seen_indexes:
+            raise ValueError(f"duplicate sprint target index: {sprint_index}")
+        seen_indexes.add(sprint_index)
+        issue_temp_ids = list(raw.get("issue_temp_ids") or [])
+        unknown = set(issue_temp_ids) - known_ids
+        duplicate_assignments = set(issue_temp_ids) & seen_issue_ids
+        if unknown:
+            raise ValueError(f"sprint target references unknown issue temp ids: {sorted(unknown)}")
+        if duplicate_assignments:
+            raise ValueError(f"issues assigned to more than one sprint: {sorted(duplicate_assignments)}")
+        seen_issue_ids.update(issue_temp_ids)
+
+        mode = raw.get("mode")
+        sprint_id = raw.get("sprint_id")
+        sprint_name = (raw.get("sprint_name") or "").strip() or None
+        if mode == "existing":
+            if sprint_id is None or int(sprint_id) <= 0:
+                raise ValueError("existing sprint target requires a positive sprint_id")
+            sprint_id = int(sprint_id)
+            sprint_name = None
+        elif mode == "new":
+            if not sprint_name:
+                raise ValueError("new sprint target requires sprint_name")
+            sprint_id = None
+        else:
+            raise ValueError(f"unknown sprint target mode: {mode}")
+
+        if issue_temp_ids:
+            targets.append(SprintTargetState(
+                sprint_index=sprint_index,
+                issue_temp_ids=issue_temp_ids,
+                mode=mode,
+                sprint_id=sprint_id,
+                sprint_name=sprint_name,
+            ))
+
+    unassigned = known_ids - seen_issue_ids
+    if unassigned:
+        raise ValueError(f"issues missing a sprint target: {sorted(unassigned)}")
+    return targets
 
 
 def _after_review(state: RolloutState) -> str:
@@ -160,7 +224,7 @@ def _after_review(state: RolloutState) -> str:
 
 
 async def create_epic_node(state: RolloutState, jira: JiraCommitClient) -> dict:
-    """Creates the real epic-type issue exactly once. Idempotency check is the same shape as
+    """Creates the real epic-type issue once per recorded workflow state. The ledger check matches
     `commit_one_node`'s: if `epic_issue_id` is already set (a post-crash resume landed here again),
     skip straight past — never create a second epic issue for one rollout.
     """
@@ -172,12 +236,54 @@ async def create_epic_node(state: RolloutState, jira: JiraCommitClient) -> dict:
         )
     except JiraCommitError as exc:
         logger.error("rollout epic creation failed", extra={"error": str(exc)})
-        return {"status": "failed", "error": str(exc)}
-    return {"epic_issue_id": issue_id, "epic_issue_key": issue_key}
+        return {"status": "failed", "error": str(exc), "failed_step": "create_epic"}
+    return {"epic_issue_id": issue_id, "epic_issue_key": issue_key, "failed_step": None}
 
 
 def _after_create_epic(state: RolloutState) -> str:
-    return END if state["status"] == "failed" else "commit_one"
+    return END if state["status"] == "failed" else "prepare_sprint"
+
+
+async def prepare_sprint_node(state: RolloutState, jira: JiraCommitClient) -> dict:
+    """Resolve one selected bucket to a real sprint id, checkpointing after each new sprint."""
+    resolved = dict(state.get("created_sprints") or {})
+    remaining = [
+        t for t in state.get("sprint_targets") or []
+        if str(t["sprint_index"]) not in resolved
+    ]
+    if not remaining:
+        return {"failed_step": None}
+
+    target = remaining[0]
+    try:
+        sprint_id = (
+            int(target["sprint_id"])
+            if target["mode"] == "existing"
+            else await jira.create_sprint(
+                state["space_id"], target["sprint_name"], state["user_id"], state["username"]
+            )
+        )
+    except JiraCommitError as exc:
+        logger.error("rollout sprint creation failed", extra={"error": str(exc)})
+        return {"status": "failed", "error": str(exc), "failed_step": "prepare_sprint"}
+
+    resolved[str(target["sprint_index"])] = sprint_id
+    return {"created_sprints": resolved, "failed_step": None}
+
+
+def _after_prepare_sprint(state: RolloutState) -> str:
+    if state["status"] == "failed":
+        return END
+    if len(state.get("created_sprints") or {}) < len(state.get("sprint_targets") or []):
+        return "prepare_sprint"
+    return "commit_one"
+
+
+def _sprint_id_for_issue(state: RolloutState, temp_id: str) -> Optional[int]:
+    for target in state.get("sprint_targets") or []:
+        if temp_id in target["issue_temp_ids"]:
+            return (state.get("created_sprints") or {}).get(str(target["sprint_index"]))
+    return None
 
 
 async def commit_one_node(state: RolloutState, jira: JiraCommitClient) -> dict:
@@ -188,30 +294,90 @@ async def commit_one_node(state: RolloutState, jira: JiraCommitClient) -> dict:
     """
     remaining = [i for i in state["issues"] if i.temp_id not in state["committed"]]
     if not remaining:
-        return {"status": "committed"}
+        return {"status": "committing", "failed_step": None}
 
     issue = remaining[0]
     try:
-        issue_key = await jira.create_issue(
-            state["space_id"], issue, state["epic_issue_id"], state["user_id"], state["username"]
+        issue_id, issue_key = await jira.create_issue(
+            state["space_id"], issue, state["epic_issue_id"],
+            _sprint_id_for_issue(state, issue.temp_id), state["user_id"], state["username"]
         )
     except JiraCommitError as exc:
         logger.error("rollout commit failed on temp_id=%s", issue.temp_id, extra={"error": str(exc)})
-        return {"status": "failed", "error": str(exc)}
+        return {"status": "failed", "error": str(exc), "failed_step": "commit_one"}
 
     committed = dict(state["committed"])
     committed[issue.temp_id] = issue_key
-    now_done = len(committed) == len(state["issues"])
+    committed_ids = dict(state.get("committed_issue_ids") or {})
+    committed_ids[issue.temp_id] = issue_id
     return {
         "committed": committed,
-        "status": "committed" if now_done else "committing",
+        "committed_issue_ids": committed_ids,
+        "status": "committing",
+        "failed_step": None,
     }
 
 
 def _after_commit_one(state: RolloutState) -> str:
+    if state["status"] == "failed":
+        return END
+    return "link_one" if len(state["committed"]) == len(state["issues"]) else "commit_one"
+
+
+def _dependency_pairs(state: RolloutState) -> list[tuple[str, str]]:
+    # A missing/empty target list identifies workflows created by the legacy standalone rollout API,
+    # whose contract explicitly did not publish dependencies. Keeping that behavior also lets an
+    # in-flight pre-upgrade checkpoint finish without the issue-id ledger added by the integrated UI.
+    if not state.get("sprint_targets"):
+        return []
+    known = {i.temp_id for i in state["issues"]}
+    return [
+        (issue.temp_id, dependency_id)
+        for issue in state["issues"]
+        for dependency_id in issue.depends_on
+        if dependency_id in known
+    ]
+
+
+async def link_one_node(state: RolloutState, jira: JiraCommitClient) -> dict:
+    """Create one dependency link after every issue exists, then checkpoint its link id."""
+    committed_links = dict(state.get("committed_links") or {})
+    remaining = [
+        pair for pair in _dependency_pairs(state)
+        if f"{pair[0]}>{pair[1]}" not in committed_links
+    ]
+    if not remaining:
+        return {"status": "committed", "failed_step": None}
+
+    source_temp_id, dependency_temp_id = remaining[0]
+    try:
+        link_id = await jira.create_issue_link(
+            state["committed_issue_ids"][source_temp_id],
+            state["committed"][dependency_temp_id],
+            state["user_id"],
+            state["username"],
+        )
+    except JiraCommitError as exc:
+        logger.error(
+            "rollout dependency link failed on %s>%s",
+            source_temp_id,
+            dependency_temp_id,
+            extra={"error": str(exc)},
+        )
+        return {"status": "failed", "error": str(exc), "failed_step": "link_one"}
+
+    committed_links[f"{source_temp_id}>{dependency_temp_id}"] = link_id
+    return {
+        "committed_links": committed_links,
+        "status": "committing",
+        "failed_step": None,
+    }
+
+
+def _after_link_one(state: RolloutState) -> str:
     if state["status"] in ("committed", "failed"):
         return END
-    return "commit_one"
+    return "link_one"
 
 
 def build_rollout_graph(
@@ -239,17 +405,34 @@ def build_rollout_graph(
     async def _commit_one(state: RolloutState) -> dict:
         return await commit_one_node(state, jira)
 
+    async def _prepare_sprint(state: RolloutState) -> dict:
+        return await prepare_sprint_node(state, jira)
+
+    async def _link_one(state: RolloutState) -> dict:
+        return await link_one_node(state, jira)
+
     graph = StateGraph(RolloutState)
     graph.add_node("plan", _plan)
     graph.add_node("review", _review)
     graph.add_node("create_epic", _create_epic)
+    graph.add_node("prepare_sprint", _prepare_sprint)
     graph.add_node("commit_one", _commit_one)
+    graph.add_node("link_one", _link_one)
 
     graph.add_edge(START, "plan")
     graph.add_edge("plan", "review")
     graph.add_conditional_edges("review", _after_review, {"create_epic": "create_epic", END: END})
-    graph.add_conditional_edges("create_epic", _after_create_epic, {"commit_one": "commit_one", END: END})
-    graph.add_conditional_edges("commit_one", _after_commit_one, {"commit_one": "commit_one", END: END})
+    graph.add_conditional_edges(
+        "create_epic", _after_create_epic, {"prepare_sprint": "prepare_sprint", END: END}
+    )
+    graph.add_conditional_edges(
+        "prepare_sprint", _after_prepare_sprint,
+        {"prepare_sprint": "prepare_sprint", "commit_one": "commit_one", END: END},
+    )
+    graph.add_conditional_edges(
+        "commit_one", _after_commit_one, {"commit_one": "commit_one", "link_one": "link_one", END: END}
+    )
+    graph.add_conditional_edges("link_one", _after_link_one, {"link_one": "link_one", END: END})
     return graph
 
 
@@ -286,6 +469,16 @@ async def retry_rollout(compiled_graph, thread_id: str) -> dict:
     if snap.values.get("status") == "committing":
         return await compiled_graph.ainvoke(None, config=config)
 
-    as_node = "review" if snap.values.get("epic_issue_id") is None else "create_epic"
-    await compiled_graph.aupdate_state(config, {"status": "committing", "error": None}, as_node=as_node)
+    failed_step = snap.values.get("failed_step")
+    if failed_step is None:
+        failed_step = "create_epic" if snap.values.get("epic_issue_id") is None else "commit_one"
+    predecessor = {
+        "create_epic": "review",
+        "prepare_sprint": "create_epic",
+        "commit_one": "prepare_sprint",
+        "link_one": "commit_one",
+    }[failed_step]
+    await compiled_graph.aupdate_state(
+        config, {"status": "committing", "error": None, "failed_step": None}, as_node=predecessor
+    )
     return await compiled_graph.ainvoke(None, config=config)
