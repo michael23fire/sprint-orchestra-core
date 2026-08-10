@@ -41,20 +41,27 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
-# --- Ground truth: AtlasCart, space 5000014 (read from vecdb 2026-07-25) -------------------------
-# Regenerate with, e.g.:
+# --- Ground truth: AtlasCart, space 5000018 (read from vecdb 2026-07-25, ids updated 2026-08-06) --
+# `total_issues`/`bugs`/`open_bugs`/`reopened`/`most_recent_issue` are genuinely time-relative or
+# reopened-status-relative — a corpus reseed (codex/m3_seed.py, see Case Study 32 Follow-up 9)
+# legitimately changes their true value. `refresh_dynamic_ground_truth()` (below) overwrites these at
+# run-time by querying vectorization-service directly, so the literals here are only a same-run
+# fallback (used verbatim if --no-dynamic-gt is passed) — they are NOT hand-maintained truth anymore,
+# don't bother keeping them in sync by hand. Everything else in this dict (attachment-content facts,
+# subtask relationships, sprint goal wording) is baked into generated file/scenario *content*, which
+# the reseed's date-shift never changes — those ARE still hand-maintained truth, regenerate with:
 #   docker exec -e PGPASSWORD=vec123 poc-vecdb psql -U vec -d vecdb -At -c \
-#     "SELECT issue_type,count(*) FROM issues WHERE space_id=5000014 GROUP BY issue_type"
+#     "SELECT issue_type,count(*) FROM issues WHERE space_id=5000018 GROUP BY issue_type"
 GT = {
     "total_issues": 83,
     "bugs": 11,
-    "open_bugs": 0,             # all 11 bugs are status=done
+    "open_bugs": 0,             # DYNAMIC — see refresh_dynamic_ground_truth; this literal is a fallback only
     "sprints": 7,              # Sprint 1-6 completed, Sprint 7 active
-    "reopened": ["ATC-30", "ATC-68"],   # status field_change with from_value='done'
+    "reopened": ["ATC-30", "ATC-68"],   # DYNAMIC — see refresh_dynamic_ground_truth; fallback only
     "only_blocked_issue": "ATC-77",     # the sole blocked issue — catalog caching, NOT checkout
     "double_click_bug": "ATC-43",       # "Checkout can create two orders from a double click"
     "last_completed_sprint_points": 37, # Sprint 6 completed_points; goal mentions "catalog"/"import"
-    "most_recent_issue": "ATC-79",      # max(updated_at) — re-verified 2026-08-03 against jira-backend
+    "most_recent_issue": "ATC-79",      # DYNAMIC — see refresh_dynamic_ground_truth; fallback only
     "latest_sprint_goal_words": ["accessible", "observable", "beta"],  # Sprint 7 goal
     "active_sprint_issue_count": 8,     # Sprint 7 has 8 issues (after the sprint_id backfill)
     # ATC-68's reopen field_change carries the reason in its OWN `description` column (not a comment)
@@ -63,9 +70,9 @@ GT = {
     # ATC-30's reason lives ONLY in a comment (its field_change description is a bare "Updated
     # status") — the case get_issue_comments (Plan B) exists for.
     "atc30_reopen_reason_words": ["browser", "twice"],
-    # ATC-43's real subtasks (parent_key relationship, structured — see EVAL_GOLDEN_SET_TAXONOMY.md's
-    # "known gap" #1: RAGAS already covers this, smoke test didn't until now). ATC-46 is a RELATED
-    # issue under the same parent epic, not a subtask of ATC-43 — a wrong answer here would name it too.
+    # ATC-43's real subtasks (parent_key relationship, structured — a known gap: RAGAS already covers
+    # this, this smoke test didn't until now). ATC-46 is a RELATED issue under the same parent epic,
+    # not a subtask of ATC-43 — a wrong answer here would name it too.
     "atc43_subtasks": ["ATC-44", "ATC-45", "ATC-47"],
     # ATC-46's attached PDF (inventory-correction-requirement.pdf, Docling-parsed -> chunk_type=
     # attachment) is the ONLY place this SKU appears — not in the issue body or any comment.
@@ -125,6 +132,41 @@ class AskResult:
         if self.retrieval_rounds == n_sem:
             return "semantic-only"
         return "mixed (semantic+structured)"
+
+
+def refresh_dynamic_ground_truth(vec_url: str, space_ids: List[int]) -> None:
+    """Refreshes the handful of GT fields that are genuinely time-relative or reopened-status-relative
+    by querying vectorization-service directly — the same source of truth `/ask` itself retrieves
+    from — instead of trusting a value someone hand-verified on some earlier date. Mutates GT in place
+    (every QUESTIONS check lambda closes over GT by reference and reads it at call time, not at
+    definition time, so this just needs to run before `run()` does).
+
+    Left untouched, deliberately: the attachment-content facts (SKUs, error codes, row numbers) baked
+    into generated file *content* — `codex/m1_scenario.py`'s logical-day date-shift never changes those
+    regardless of when the corpus is reseeded, so pinning them is correct, not a maintenance gap. Only
+    "what does the CURRENT database say right now" facts belong here.
+    """
+    def _post(path: str, body: dict) -> dict:
+        req = urllib.request.Request(
+            vec_url.rstrip("/") + path, data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
+
+    recent = _post("/issues/query", {"space_ids": space_ids, "order_by": "updated_at", "order": "desc", "limit": 1})
+    if recent.get("issues"):
+        GT["most_recent_issue"] = recent["issues"][0]["issue_key"]
+
+    reopened = _post("/issues/history", {"space_ids": space_ids, "reopened_only": True, "limit": 50})
+    reopened_keys = sorted({c["issue_key"] for c in reopened.get("changes", [])})
+    if reopened_keys:
+        GT["reopened"] = reopened_keys
+
+    bugs = _post("/issues/query", {"space_ids": space_ids, "issue_types": ["bug"], "limit": 200}).get("issues", [])
+    if bugs:
+        GT["bugs"] = len(bugs)
+        GT["open_bugs"] = sum(1 for b in bugs if (b.get("status") or "").lower() != "done")
 
 
 def ask(base_url: str, question: str, space_ids: List[int], history: List[dict]) -> AskResult:
@@ -195,7 +237,7 @@ QUESTIONS: List[Question] = [
         "not abstained; identifies Sprint 7 via its GOAL text (chunk_type=sprint), not a "
         "similarly-worded issue.",
         lambda r: (
-            (not r.abstained) and _has(r.answer, "sprint 7", "5000074"),
+            (not r.abstained) and _has(r.answer, "sprint 7", "5000104"),
             "sprint-goal chunk reachable",
         ),
     ),
@@ -224,7 +266,14 @@ QUESTIONS: List[Question] = [
         f"exact bug count {GT['bugs']}; states {GT['open_bugs']} are still open (all are done).",
         lambda r: (
             _has(r.answer, str(GT["bugs"]))
-            and _has(r.answer, "0", "zero", "none", "all", "all done"),
+            and (
+                _has(r.answer, str(GT["open_bugs"]))
+                if GT["open_bugs"] > 0
+                # Only accept the "zero" phrasings when GT genuinely says zero — this used to be
+                # hardcoded regardless of GT["open_bugs"]'s actual value, so it silently kept PASSing
+                # even after a reseed made the true open count nonzero (found live 2026-08-06).
+                else _has(r.answer, "0", "zero", "none", "all", "all done")
+            ),
             f"expected bugs={GT['bugs']}, open={GT['open_bugs']}",
         ),
     ),
@@ -498,8 +547,8 @@ QUESTIONS: List[Question] = [
         ),
     ),
     # Epic/subtask relationship (parent_key) — RAGAS already covers this (subtask list + epic-of x2),
-    # smoke test didn't until now (see EVAL_GOLDEN_SET_TAXONOMY.md's "known gap" #1). ATC-46 is a
-    # related issue under the same parent epic (ATC-4), NOT a subtask of ATC-43 — naming it here would
+    # this smoke test didn't until now. ATC-46 is a related issue under the same parent epic (ATC-4),
+    # NOT a subtask of ATC-43 — naming it here would
     # be a false positive, the same class of mistake Case Study 17/18 already found and fixed.
     Question(
         28, "structured-relationship-subtasks",
@@ -588,13 +637,21 @@ def list_questions() -> None:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--url", default="http://localhost:8200", help="ai-service base URL")
-    p.add_argument("--space-ids", default="5000014", help="comma-separated space ids (default AtlasCart)")
+    p.add_argument("--vec-url", default="http://localhost:8100", help="vectorization-service base URL, for refresh_dynamic_ground_truth")
+    p.add_argument("--space-ids", default="5000018", help="comma-separated space ids (default AtlasCart)")
     p.add_argument("--list", action="store_true", help="print the questions for UI copy-paste and exit")
+    p.add_argument(
+        "--no-dynamic-gt", action="store_true",
+        help="Skip refresh_dynamic_ground_truth and trust the pinned GT literals as-is — mainly for "
+             "running this against a vectorization-service that isn't reachable from here.",
+    )
     args = p.parse_args()
     if args.list:
         list_questions()
         return 0
     space_ids = [int(x) for x in args.space_ids.split(",") if x.strip()]
+    if not args.no_dynamic_gt:
+        refresh_dynamic_ground_truth(args.vec_url, space_ids)
     t0 = time.time()
     code = run(args.url, space_ids)
     print(f"({time.time() - t0:.1f}s total)")

@@ -42,7 +42,7 @@ the more reliably-compatible option across browsers.)
 ## How to actually test it — a guided walkthrough, not just "click around"
 
 The page has **preset buttons** under each panel filling in real questions against the **M3 dataset**
-(`codex/` — 83 real issues, 268 comments, 132 attachments, `space_ids=5000014`) — the user's own
+(`codex/` — 83 real issues, 268 comments, 132 attachments, `space_ids=5000018`) — the user's own
 3-month synthetic-but-realistic project history, not a small hand-written eval corpus. Every preset
 has a *known expected behavior* to check against, not just "see what happens."
 

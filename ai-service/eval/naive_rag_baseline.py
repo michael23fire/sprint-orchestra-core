@@ -100,7 +100,7 @@ async def collect_naive_samples(vec_url: str, settings: Settings, space_ids: lis
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://localhost:8100", help="vectorization-service base URL")
-    parser.add_argument("--space-ids", type=int, nargs="+", default=[5000014])
+    parser.add_argument("--space-ids", type=int, nargs="+", default=[5000018])
     parser.add_argument(
         "--llm-base-url", default="http://localhost:1234/v1",
         help="OpenAI-compatible endpoint for BOTH the answering model and the RAGAS judge.",

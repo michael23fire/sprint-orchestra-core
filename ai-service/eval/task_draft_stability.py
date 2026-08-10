@@ -45,7 +45,7 @@ async def _fetch_real_descriptions(dsn: str, n: int) -> List[Tuple[str, str]]:
     try:
         rows = await pool.fetch(
             "SELECT issue_key, description FROM issues "
-            "WHERE space_id = 5000014 AND description IS NOT NULL AND length(description) > 200 "
+            "WHERE space_id = 5000018 AND description IS NOT NULL AND length(description) > 200 "
             "ORDER BY random() LIMIT $1",
             n,
         )
