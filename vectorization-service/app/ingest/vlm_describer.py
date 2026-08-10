@@ -3,9 +3,9 @@
 Same rationale structure as `app/ingest/contextualizer.py` (off by default, real LLM cost, two
 provider backends) applied to a different problem: `docling_parser.py`'s EasyOCR path does classic
 OCR — detect text regions, read characters, no understanding of what the text means — which is fast
-and free but has a specific, real failure mode documented in that module and in
-docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 27: on a degraded (rotated/blurred/low-contrast/
-re-compressed) photo, EasyOCR doesn't fail loudly, it produces a *confident-looking wrong token*
+and free but has a specific, real failure mode documented in that module: on a degraded
+(rotated/blurred/low-contrast/re-compressed) photo, EasyOCR doesn't fail loudly, it produces a
+*confident-looking wrong token*
 ("Mx" as its read of a mangled "SKU:"+"Pallet" region) that a downstream agent then presents as a real
 value. A confidence threshold filters the worst of that, but doesn't recover the value — it just turns
 "wrong" into "missing."

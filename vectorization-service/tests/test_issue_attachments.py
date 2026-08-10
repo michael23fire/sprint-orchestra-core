@@ -5,8 +5,7 @@ unranked fetch of an issue's attachment chunk(s) by key (see VectorStore.get_iss
 docstring). Exists because a semantic/hybrid search query can't reliably be phrased to find a specific
 fact it doesn't already know the exact wording of (an exact SKU, an ID) — found live, this made
 "what SKU does ATC-46's attachment use" flip between finding the answer and abstaining across
-otherwise-equivalent phrasings, even though the fact was always in the index. See
-docs/RAG_ACCURACY_CASE_STUDIES.md.
+otherwise-equivalent phrasings, even though the fact was always in the index.
 """
 from app.db.vector_store import VectorStore
 

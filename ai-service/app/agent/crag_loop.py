@@ -507,10 +507,10 @@ def _initial_tool_choice(question: str) -> str:
 @dataclass(frozen=True, slots=True)
 class ClaimMismatch:
     """One post-generation verification failure: a specific claim in the answer contradicted by a
-    structured fact (see Case Study 15 in docs/RAG_ACCURACY_CASE_STUDIES.md and
-    `CragAgent._post_generation_verifiers`). `detail` is the exact, human-readable correction fed back
-    to the model — the verifier that found the mismatch owns the wording since it knows the specific
-    field/relationship it checked; the generic correction-message builder just joins these verbatim."""
+    structured fact (see `CragAgent._post_generation_verifiers`). `detail` is the exact, human-readable
+    correction fed back to the model — the verifier that found the mismatch owns the wording since it
+    knows the specific field/relationship it checked; the generic correction-message builder just
+    joins these verbatim."""
 
     issue_key: str
     detail: str
@@ -528,7 +528,7 @@ class AgentAnswer:
     # grounded in what was retrieved" (e.g. RAGAS faithfulness) has somewhere to look up a claim like
     # "ATC-77 is blocked" — `citations` alone only ever covers search_knowledge_base/get_issue_*
     # prose, never a structured tool's own facts, so a claim sourced purely from query_issues had no
-    # matching context to be scored against. See docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 23.
+    # matching context to be scored against.
     structured_evidence: List[str] = field(default_factory=list)
     abstained: bool = False
     usage: Usage = field(default_factory=Usage)
@@ -555,12 +555,11 @@ class CragAgent:
         # A direct _timed_llm_call outside ask() still gets a deterministic fallback. Normal calls
         # use the task-local `_request_system_prompt`, so concurrent requests cannot overwrite it.
         self._default_system = _system_prompt("1970-01-01T00:00:00Z")
-        # Registry of deterministic post-generation verifiers (see Case Studies 15/17 in
-        # docs/RAG_ACCURACY_CASE_STUDIES.md). Additional relationship verifiers can be registered
-        # here without adding branches to the main ask loop. `_check_faithfulness` is intentionally
-        # NOT in this list (see `_apply_verification`) — it needs the retrieved context itself, which
-        # this list's uniform (text, space_ids, subject_keys) signature doesn't carry, unlike these
-        # two, which re-query their own source of truth instead of needing it passed in.
+        # Registry of deterministic post-generation verifiers. Additional relationship verifiers can
+        # be registered here without adding branches to the main ask loop. `_check_faithfulness` is
+        # intentionally NOT in this list (see `_apply_verification`) — it needs the retrieved context
+        # itself, which this list's uniform (text, space_ids, subject_keys) signature doesn't carry,
+        # unlike these two, which re-query their own source of truth instead of needing it passed in.
         self._post_generation_verifiers = [
             self._check_subtask_claims,
             self._check_current_state_claims,

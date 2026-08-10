@@ -126,8 +126,7 @@ CASES: List[RagasCase] = [
         # Ground truth here comes ONLY from ATC-46's attached PDF (inventory-correction-requirement.pdf,
         # parsed via Docling into chunk_type=attachment) — the SKU value never appears in the issue's
         # own title/description or in any comment. Added after finding attachment content was fully
-        # implemented and indexed but had zero eval coverage proving it's actually reachable end-to-end
-        # (see docs/RAG_ACCURACY_CASE_STUDIES.md).
+        # implemented and indexed but had zero eval coverage proving it's actually reachable end-to-end.
         "ATC-46 attachment worked example: what SKU and order reference does it use, and what "
         "quantity is restored?",
         "The worked example uses SKU A-104, order reference BETA-1043, and a restored quantity of 1.",
@@ -161,8 +160,8 @@ CASES: List[RagasCase] = [
     ),
     RagasCase(
         # PNG screenshot, OCR'd via EasyOCR. Deliberately graded on the price (a robust OCR signal),
-        # not the garbled product-name text this fixture's OCR pass mangles (see
-        # docs/RAG_ACCURACY_CASE_STUDIES.md) — standard practice for noisy-OCR eval.
+        # not the garbled product-name text this fixture's OCR pass mangles — standard practice for
+        # noisy-OCR eval.
         "ATC-15 attached screenshot (before state): what price is shown for the item?",
         "The price shown is USD 28.00.",
     ),
@@ -228,7 +227,7 @@ def collect_samples(base_url: str, space_ids: List[int]) -> tuple[List[dict], Li
     wasn't being surfaced through the API or fed to RAGAS. Fixed live after finding it caused a false
     "unfaithful" score on a genuinely correct, tool-grounded answer ("is there a blocked issue" —
     the "blocked" status came from query_issues, not from the one retrieved text chunk RAGAS could
-    see) — see docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 23.
+    see).
 
     `AskResponse.structured_evidence` now carries exactly that text, so it's included in
     `retrieved_contexts` alongside `citations` here. The exclusion path below should now rarely
@@ -278,7 +277,7 @@ def collect_samples(base_url: str, space_ids: List[int]) -> tuple[List[dict], Li
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://localhost:8200")
-    parser.add_argument("--space-ids", type=int, nargs="+", default=[5000014])
+    parser.add_argument("--space-ids", type=int, nargs="+", default=[5000018])
     parser.add_argument(
         "--llm-base-url", default="http://localhost:1234/v1",
         help="OpenAI-compatible endpoint for the RAGAS judge model (LM Studio by default).",

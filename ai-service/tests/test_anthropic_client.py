@@ -1,8 +1,7 @@
 """AnthropicClient prompt-caching tests — mocked SDK, no real API key/network.
 
 Verifies the request shape (cache_control placement) and that cache usage counters are parsed from
-the response, without needing ANTHROPIC_API_KEY (none is configured in this environment — see
-docs/AI_FEATURE_ROADMAP.md for the same caveat elsewhere in this repo).
+the response, without needing ANTHROPIC_API_KEY (none is configured in this environment).
 """
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch

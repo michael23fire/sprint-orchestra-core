@@ -36,8 +36,7 @@ class IssueIngestionMessage(_CamelModel):
     # commonly set once at issue creation and never changed again — a history-only sync would never
     # observe that initial value, only later edits. Found live: every AtlasCart issue's priority
     # showed NULL in the structured metadata table despite jira-backend having real values, because
-    # this field wasn't in the producer's payload yet — see migrations/008 and
-    # docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 23's follow-up.
+    # this field wasn't in the producer's payload yet — see migrations/008.
     priority: Optional[str] = None
     # Which sprint the issue is CURRENTLY in — null means backlog (no sprint), not "unknown"; jira-
     # backend sends both the id (for filtering) and the name (for display without a second lookup).
@@ -204,8 +203,7 @@ class IssueMetadata:
     title: Optional[str] = None
     # Null unless this issue is a subtask — see migrations/007. Denormalized (the parent's KEY, not a
     # FK to issue_id) for the same reason IssueIngestionMessage.parent_key already is: a plain,
-    # queryable "is X actually the parent of these subtasks" fact, not guessed from prose. See
-    # docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 17.
+    # queryable "is X actually the parent of these subtasks" fact, not guessed from prose.
     parent_key: Optional[str] = None
     # See migrations/012. Nullable because unassigned/unestimated are real states.
     assignee_id: Optional[int] = None

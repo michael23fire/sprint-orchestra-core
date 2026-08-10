@@ -409,10 +409,10 @@ class VectorStore:
 
         The `get_issue_comments` sibling, over `chunk_type='issue'` instead of `'comment'`. Exists
         because search's top-K ranking is not guaranteed to surface an issue's own record even when
-        its key is known exactly: found live (see docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 11) —
-        an issue with a dozen comments can have its single title+description chunk rank *below*
-        several of those comments for a query that's just its own key, because `ts_rank_cd` has no
-        length normalization and a comment that also happens to mention the key scores competitively
+        its key is known exactly: found live — an issue with a dozen comments can have its single
+        title+description chunk rank *below* several of those comments for a query that's just its
+        own key, because `ts_rank_cd` has no length normalization and a comment that also happens to
+        mention the key scores competitively
         with the issue's own (shorter, single-mention) record. `get_issue_comments` already solved
         this exact class of problem for comments; issue bodies had no equivalent primitive until now.
         """

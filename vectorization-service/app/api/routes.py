@@ -445,8 +445,8 @@ async def issue_details(req: IssueDetailsRequest, request: Request) -> IssueDeta
     Exists because an issue with many comments can have its own single title+description chunk rank
     *below* several of those comments — `ts_rank_cd` has no length normalization, so a short chunk
     that mentions its key once doesn't automatically out-rank comments that also mention it (found
-    live, see docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 11). This is a plain exact-match SELECT
-    against `chunks`, no embedding call, so an issue's own body cannot be missed as long as the key
+    live). This is a plain exact-match SELECT against `chunks`, no embedding call, so an issue's own
+    body cannot be missed as long as the key
     is right — the same guarantee /issues/comments already gives for comments.
     """
     store = request.app.state.store
@@ -501,9 +501,9 @@ async def issue_attachments(req: IssueAttachmentsRequest, request: Request) -> I
     Exists because a semantic/hybrid query can't reliably be phrased to find a specific fact (an
     exact SKU, an ID) it doesn't already know the wording of — found live, "what SKU does ATC-46's
     attachment use" flipped between finding the answer and abstaining across otherwise-equivalent
-    phrasings of the same question, even though the fact was always in the index (see
-    docs/RAG_ACCURACY_CASE_STUDIES.md). This is a plain exact-match SELECT against `chunks`, no
-    embedding call, so an issue's attachment content cannot be missed once its key is known.
+    phrasings of the same question, even though the fact was always in the index. This is a plain
+    exact-match SELECT against `chunks`, no embedding call, so an issue's attachment content cannot
+    be missed once its key is known.
     """
     store = request.app.state.store
     try:

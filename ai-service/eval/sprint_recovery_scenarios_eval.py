@@ -1,5 +1,6 @@
 """12 hand-constructed sprint-recovery scenarios with ground truth defined *before* this script is ever
-run — the same discipline Case Study 29's ablation used ("decision rule written before the first run").
+run — the same discipline applied to every eval in this codebase ("decision rule written before the
+first run").
 
 **Why this exists, given `eval/sprint_recovery_eval.py` already runs diagnose against all 7 real
 AtlasCart sprints**: that eval answers "does the confidence gate fire sensibly on real data" (it does,
@@ -7,11 +8,13 @@ honestly explained by 6 of 7 sprints being completed with zero risk signals — 
 active sprint to test against). It cannot answer "when there IS a real signal, does the model find the
 *correct* root cause and propose a *sensible* action" — AtlasCart doesn't currently contain sprints with
 known, designed-in failure causes. This script is the bounded middle ground between that real-data eval
-and a full 50-100-scenario/LLM-judge pipeline (deliberately not built yet — see the "Follow-up" section
-of Case Study 32 in docs/RAG_ACCURACY_CASE_STUDIES.md for why): hand-written ground truth per scenario,
-graded **deterministically** (substring/issue-key matching, not an LLM judge) — consistent with this
-whole codebase's "code computes, LLM explains" split applied to grading itself, not just to the
-workflow under test.
+and a full 50-100-scenario/LLM-judge pipeline — deliberately not built yet: there's no evidence so far
+that the model's failure modes need that much resolution to characterize, and an LLM judge is itself
+something that would need its own validation before it could be trusted.
+
+So: hand-written ground truth per scenario, graded **deterministically** (substring/issue-key matching,
+not an LLM judge) — consistent with this whole codebase's "code computes, LLM explains" split applied
+to grading itself, not just to the workflow under test.
 
 **Why 12, not 6, and not 20-30.** The first 6 (started with `undocumented_dependency`, ending at
 `stale_status_already_done` below) covered 6 of the original 10-category brainstormed taxonomy — the

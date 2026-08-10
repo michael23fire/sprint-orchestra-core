@@ -54,8 +54,8 @@ class Settings(BaseSettings):
     # --- Chunking ---
     # 800/130 (~16% overlap), not the more common 500/80 default: a real ablation (300 vs 500 vs 800
     # tokens, all 4 RAGAS metrics, judge=qwen2.5-72b-instruct, same 19-question set) found 800 winning
-    # on every metric for this corpus — see docs/RAG_ACCURACY_CASE_STUDIES.md. Attachments with tables/
-    # structured data are the likely reason: they fragment badly at smaller windows.
+    # on every metric for this corpus. Attachments with tables/structured data are the likely reason:
+    # they fragment badly at smaller windows.
     chunk_size_tokens: int = 800
     chunk_overlap_tokens: int = 130
 
@@ -119,8 +119,7 @@ class Settings(BaseSettings):
     # The confidence threshold above filters out garbled OCR fragments, but it can only turn "wrong"
     # into "missing" — it can't recover the value. A vision-language model sees the whole image and
     # can respond "this is illegible" instead of guessing a character sequence, which is the actual
-    # gap: see docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 27 (degraded-photo test) and Case Study 30
-    # (this fallback's own writeup).
+    # gap.
     #
     # Off by default — a real LLM call per escalated image, same cost argument
     # contextual_retrieval_enabled already makes. Only escalates when EasyOCR showed a concrete sign

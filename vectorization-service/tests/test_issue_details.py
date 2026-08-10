@@ -3,7 +3,7 @@
 The chunk_type='issue' counterpart to test_issue_comments.py: complete, unranked fetch of an issue's
 own title+description chunk(s) by key (see VectorStore.get_issue_details docstring). Exists because an
 issue with many comments can have its own single body chunk rank below several of those comments in
-both lexical and vector search — see docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 11.
+both lexical and vector search.
 """
 from app.db.vector_store import VectorStore
 

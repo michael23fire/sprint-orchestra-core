@@ -77,7 +77,7 @@ class PlanCase:
 
 # Each case seeds one specific failure mode a single-pass planner is plausibly bad at. Deliberately
 # NOT ten variations of "build a feature" — a golden set that can't distinguish the two arms tells you
-# nothing regardless of how many rows it has (same reasoning as docs/EVAL_GOLDEN_SET_TAXONOMY.md).
+# nothing regardless of how many rows it has.
 CASES: List[PlanCase] = [
     PlanCase(
         name="trivial-one-liner",

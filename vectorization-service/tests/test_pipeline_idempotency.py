@@ -238,10 +238,9 @@ async def test_html_is_stripped_before_storing(pipeline):
 
 
 async def test_subtask_embeds_parent_context(pipeline):
-    # Case Study 13/14 (docs/RAG_ACCURACY_CASE_STUDIES.md): a subtask's own text is often too terse to
-    # be findable or correctly characterized on its own — embedding the parent's key+title directly
-    # into the subtask's own chunk means that context doesn't depend on the parent's chunk also
-    # ranking into the same top-K.
+    # A subtask's own text is often too terse to be findable or correctly characterized on its own —
+    # embedding the parent's key+title directly into the subtask's own chunk means that context
+    # doesn't depend on the parent's chunk also ranking into the same top-K.
     pipe, _ = pipeline
     msg = _issue_msg()
     msg = msg.model_copy(update={
@@ -311,7 +310,7 @@ async def test_issue_upsert_records_structured_metadata(pipeline):
     # history-stream self-heal (see append_issue_change's "priority" branch) — most issues have
     # their priority set once at creation and never changed again, so a history-only sync would
     # never observe the initial value at all. Found live against real AtlasCart data before this
-    # field was added here (docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 23's follow-up).
+    # field was added here.
     assert meta.priority == "high"
 
 

@@ -33,8 +33,7 @@ async def test_issue_backfill_fetches_all_structured_fields_and_scopes_spaces():
     # unconditionally overwrites with whatever the message carries — so every full backfill run
     # silently NULLed out already-correct issue_type/status/created_at/updated_at/parent_key for every
     # issue already in the vector store. Found live: query_issues(issue_types=['bug']) returned 0 for
-    # a space with 11 real bugs, right after running --include-attachments (see
-    # docs/RAG_ACCURACY_CASE_STUDIES.md).
+    # a space with 11 real bugs, right after running --include-attachments.
     pool = FakePool()
 
     await _fetch_issues(pool, [5000014])

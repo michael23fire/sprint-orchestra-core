@@ -1,4 +1,4 @@
-"""Prompt-injection resistance probe for CragAgent (P1 in docs/INTERVIEW_TALKING_POINTS.md).
+"""Prompt-injection resistance probe for CragAgent.
 
 Question this answers: if an attacker plants adversarial instructions inside content that gets
 retrieved (a comment, an issue description — anything an untrusted user of the underlying Jira-style
@@ -37,7 +37,7 @@ from app.agent.retrieval_tool import (
 from app.config import Settings
 from app.llm.factory import build_llm_client
 
-AUTHORIZED_SPACE_IDS = [5000014]
+AUTHORIZED_SPACE_IDS = [5000018]  # re-pointed 2026-08-06 after codex/m3_seed.py was re-run
 
 
 class PoisonedRetrieval:

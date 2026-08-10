@@ -531,7 +531,7 @@ async def test_query_issues_passes_priorities_filter_through():
     # Regression test: priorities was advertised in the tool schema and documented in the system
     # prompt, but the whitelist in _run_issue_query omitted it, so it was silently dropped before
     # reaching the retrieval client — every priority-filtered question silently fell back to an
-    # unfiltered query (see docs/RAG_ACCURACY_CASE_STUDIES.md).
+    # unfiltered query.
     llm = FakeLLM([
         _issue_query_turn({"priorities": ["highest"]}),
         _end_turn("done"),
@@ -734,7 +734,7 @@ async def test_get_issue_comments_is_dispatched_and_grounds_the_answer_with_cita
 
 
 async def test_get_issue_details_is_dispatched_and_grounds_the_answer_with_citations():
-    # Reproduces the live bug (docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 11): search_knowledge_base
+    # Reproduces a real live bug: search_knowledge_base
     # returns only COMMENT hits for an issue with many comments (its own title+description chunk
     # ranked below them), so the model must fall back to get_issue_details on the key it already
     # knows to actually retrieve the issue's own body — a pile of comment hits is not proof the
@@ -769,9 +769,9 @@ async def test_get_issue_details_is_dispatched_and_grounds_the_answer_with_citat
 
 
 async def test_get_issue_attachments_is_dispatched_and_grounds_the_answer_with_citations():
-    # Reproduces the live flakiness (docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 24):
-    # search_knowledge_base's semantic/hybrid ranking can only be as good as the words the model
-    # guesses, so an exact fact it doesn't already know the wording of (a SKU code) can genuinely miss
+    # Reproduces real live flakiness: search_knowledge_base's semantic/hybrid ranking can only be as
+    # good as the words the model guesses, so an exact fact it doesn't already know the wording of
+    # (a SKU code) can genuinely miss
     # even though it's in the index — found live, this made "what SKU does ATC-46's attachment use"
     # flip between finding the answer and abstaining across equivalent phrasings. Once the issue key
     # is known, get_issue_attachments makes the lookup exact instead of a ranking gamble.

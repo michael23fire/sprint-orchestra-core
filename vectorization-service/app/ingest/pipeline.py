@@ -183,10 +183,10 @@ class IngestPipeline:
         # prefixed in too — not just for the lexical index (migrations/003 already covers that via
         # `search_vector`'s generated column, independent of this text), but for the EMBEDDING/vector
         # side, which has no equivalent: the embedding is computed straight from this string, and
-        # before this fix it never contained the issue's own key at all. Found live (see
-        # docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 11): an issue with many comments can have its
-        # single title+description chunk rank below several of its own comments for a query that's
-        # just its key, in BOTH lexical (ts_rank_cd has no length normalization) and vector search —
+        # before this fix it never contained the issue's own key at all. Found live: an issue with
+        # many comments can have its single title+description chunk rank below several of its own
+        # comments for a query that's just its key, in BOTH lexical (ts_rank_cd has no length
+        # normalization) and vector search —
         # this closes the vector half of that gap at the source, for newly-ingested/re-ingested
         # issues. (get_issue_details is still the decisive, ranking-independent fix — this is a
         # complementary improvement to the ranking signal itself, not a replacement for it.)
@@ -199,8 +199,7 @@ class IngestPipeline:
         elif msg.parent_key:
             # A subtask's own title+description is often too terse to be findable, or correctly
             # characterized, on its own — "Reject repeated checkout requests" carries no hint it
-            # belongs to a specific checkout incident. Found live (see
-            # docs/RAG_ACCURACY_CASE_STUDIES.md Case Study 13/14): the agent repeatedly mischaracterized
+            # belongs to a specific checkout incident. Found live: the agent repeatedly mischaracterized
             # a RELATED-but-separate issue as a subtask, and separately needed a post-generation code
             # check because retrieval alone couldn't reliably connect a subtask back to its parent.
             # Embedding the parent's key+title directly into the subtask's own chunk means that context
